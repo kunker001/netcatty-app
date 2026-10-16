@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <link rel="stylesheet" href="xterm.css" />
+  <style>
+    html, body, #term {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #ffffff;
+      overflow: hidden;
+    }
+    .xterm, .xterm-viewport, .xterm-screen {
+      width: 100%;
+      height: 100%;
+    }
+    .xterm:not(.allow-transparency) .xterm-viewport {
+      background-color: #ffffff !important;
+    }
+    #ime {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0.02;
+      z-index: 40;
+      border: 0;
+      margin: 0;
+      padding: 0;
+      resize: none;
+      outline: none;
+      overflow: hidden;
+      background: transparent;
+      color: transparent;
+      caret-color: transparent;
+      font-size: 16px;
+      line-height: 16px;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #selbar {
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      top: 8px;
+      z-index: 50;
+      display: none;
+      gap: 8px;
+      justify-content: center;
+      pointer-events: none;
+    }
+    #selbar.visible { display: flex; }
+    #selbar button {
+      pointer-events: auto;
+      border: 1px solid #e3e8ee;
+      background: #ffffff;
+      color: #1b2430;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13px;
+      box-shadow: 0 2px 8px rgba(27, 36, 48, 0.12);
+    }
+    #selbar button.primary {
+      background: #0ea5e9;
+      color: #ffffff;
+      border-color: #0ea5e9;
+    }
+    .xterm .xterm-helper-textarea {
+      left: 0 !important;
+      top: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      opacity: 0.01 !important;
+      font-size: 16px !important;
+      z-index: 10 !important;
+      caret-color: transparent;
+      pointer-events: none;
+    }
+    @keyframes nc-bar-blink {
+      50% { box-shadow: none; }
+    }
+    @keyframes nc-block-blink {
+      0% { background-color: #0ea5e9; color: #ffffff; }
+      50% { background-color: inherit; color: #0ea5e9; }
+    }
+    .xterm .xterm-rows .xterm-cursor.xterm-cursor-bar,
+    .xterm .xterm-rows .xterm-cursor.xterm-cursor-outline {
+      animation: nc-bar-blink 1s step-end infinite !important;
+    }
+    .xterm .xterm-rows .xterm-cursor.xterm-cursor-outline {
+      outline: none !important;
+      box-shadow: 2px 0 0 #0ea5e9;
+    }
+    .xterm .xterm-rows .xterm-cursor.xterm-cursor-block {
+      animation: nc-block-blink 1s step-end infinite !important;
+    }
+  </style>
+</head>
+<body>
+  <div id="term"></div>
+  <textarea id="ime" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" inputmode="verbatim" enterkeyhint="enter"></textarea>
+  <div id="selbar">
+    <button type="button" id="sel-copy" class="primary">复制</button>
+    <button type="button" id="sel-all">全选</button>
+    <button type="button" id="sel-clear">取消</button>
+  </div>
+  <script src="xterm.js"></script>
+  <script src="addon-fit.js"></script>
+  <script>
+    const MIN_FONT = 9;
+    const MAX_FONT = 28;
+    const clampFont = (size) => Math.round(Math.min(MAX_FONT, Math.max(MIN_FONT, size)));
+    let fontSize = 13;
+    try {
+      const saved = Number(localStorage.getItem("nc-font"));
+      if (saved) fontSize = clampFont(saved);
+    } catch (e) {}
+
+    const term = new Terminal({
+      cursorBlink: true,
+      cursorStyle: "bar",
+      cursorInactiveStyle: "bar",
+      cursorWidth: 2,
+      fontFamily: "monospace",
+      fontSize: fontSize,
+      lineHeight: 1.15,
+      theme: {
+        background: "#ffffff",
+        foreground: "#1b2430",
+        cursor: "#0ea5e9",
+        cursorAccent: "#ffffff",
+        selectionBackground: "#7dd3fc",
+        selectionInactiveBackground: "#bae6fd",
+        black: "#1b2430",
+        red: "#dc2626",
+        green: "#16a34a",
+        yellow: "#ca8a04",
+        blue: "#0284c7",
+        magenta: "#7c3aed",
+        cyan: "#0ea5e9",
+        white: "#e5e7eb",
+        brightBlack: "#667085",
+        brightRed: "#ef4444",
+        brightGreen: "#22c55e",
+        brightYellow: "#eab308",
+        brightBlue: "#38bdf8",
+        brightMagenta: "#a78bfa",
+        brightCyan: "#22d3ee",
+        brightWhite: "#111827",
+      },
+      scrollback: 5000,
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById("term"));
+    const ime = document.getElementById("ime");
+    let composing = false;
+    let skipInput = false;
+    let typedWord = "";
+
+    const send = (data) => {
+      if (!data) return;
+      if (window.Netcatty && window.Netcatty.onData) window.Netcatty.onData(data);
+      if (data === " " || data === "\r" || data === "\n" || data === "\t") {
+        typedWord = "";
+      } else if (data === "\x7f") {
+        typedWord = typedWord.slice(0, -1);
+      } else {
+        typedWord = (typedWord + data).slice(-40);
+      }
+    };
+
+    const commitIme = (raw, fromComposition) => {
+      const value = raw || "";
+      ime.value = "";
+      if (!value) return;
+      const hadSpace = /[ \u00a0]$/.test(value);
+      const trimmed = value.replace(/[ \u00a0]+$/g, "");
+      if (!fromComposition && trimmed.length > 1 && typedWord === trimmed) {
+        if (hadSpace) send(" ");
+        return;
+      }
+      send(value);
+    };
+
+    const pinHelper = () => {
+      const ta = document.querySelector(".xterm-helper-textarea");
+      if (!ta) return;
+      ta.style.setProperty("left", "0px", "important");
+      ta.style.setProperty("top", "0px", "important");
+      ta.style.setProperty("width", "100%", "important");
+      ta.style.setProperty("height", "100%", "important");
+      ta.style.setProperty("opacity", "0.01", "important");
+      ta.style.setProperty("font-size", "16px", "important");
+      ta.setAttribute("inputmode", "text");
+      ta.setAttribute("autocomplete", "off");
+      ta.setAttribute("autocorrect", "off");
+      ta.setAttribute("autocapitalize", "off");
+      ta.readOnly = false;
+      ta.disabled = false;
+    };
+
+    const markTerminalFocused = () => {
+      try {
+        const core = term._core;
+        if (core) {
+          if (core._coreBrowserService) core._coreBrowserService._isFocused = true;
+          if (core.coreService && !core.coreService.isCursorInitialized) {
+            core.coreService.isCursorInitialized = true;
+          }
+          if (core._renderService && typeof core._renderService.handleFocus === "function") {
+            core._renderService.handleFocus();
+          }
+        }
+      } catch (e) {}
+      if (term.element) {
+        term.element.classList.add("focus");
+        const rows = term.element.querySelector(".xterm-rows");
+        if (rows) rows.classList.add("xterm-focus");
+      }
+      try {
+        const y = term.buffer.active.cursorY;
+        term.refresh(y, y);
+      } catch (e) {}
+    };
+
+    const selbar = document.getElementById("selbar");
+    let selecting = false;
+    let selAnchor = null;
+    let longTimer = 0;
+    let startX = 0;
+    let startY = 0;
+    let moved = false;
+    let didSelectThisGesture = false;
+    const MOVE_PX = 12;
+    const LONG_MS = 380;
+
+    const cellSize = () => {
+      try {
+        const d = term._core._renderService.dimensions.css.cell;
+        if (d && d.width && d.height) return d;
+      } catch (e) {}
+      const rect = (term.element.querySelector(".xterm-screen") || term.element).getBoundingClientRect();
+      return { width: rect.width / Math.max(1, term.cols), height: rect.height / Math.max(1, term.rows) };
+    };
+
+    const cellAt = (x, y) => {
+      const size = cellSize();
+      const el = term.element.querySelector(".xterm-screen") || term.element;
+      const rect = el.getBoundingClientRect();
+      const col = Math.max(0, Math.min(term.cols - 1, Math.floor((x - rect.left) / size.width)));
+      const rowView = Math.max(0, Math.min(term.rows - 1, Math.floor((y - rect.top) / size.height)));
+      return { col, row: term.buffer.active.viewportY + rowView };
+    };
+
+    const charAt = (col, row) => {
+      try {
+        const line = term.buffer.active.getLine(row);
+        if (!line) return " ";
+        const cell = line.getCell(col);
+        const ch = cell && cell.getChars ? cell.getChars() : "";
+        return ch || " ";
+      } catch (e) {
+        return " ";
+      }
+    };
+
+    const isWordChar = (ch) => /[A-Za-z0-9_./:@%+=~-]/.test(ch);
+
+    const applyRange = (a, b) => {
+      const aLin = a.row * term.cols + a.col;
+      const bLin = b.row * term.cols + b.col;
+      const start = aLin <= bLin ? a : b;
+      const end = aLin <= bLin ? b : a;
+      const length = Math.max(1, (end.row - start.row) * term.cols + (end.col - start.col) + 1);
+      term.select(start.col, start.row, length);
+      selbar.classList.add("visible");
+    };
+
+    const selectWord = (col, row) => {
+      if (!isWordChar(charAt(col, row))) {
+        applyRange({ col, row }, { col, row });
+        return;
+      }
+      let s = col;
+      let e = col;
+      while (s > 0 && isWordChar(charAt(s - 1, row))) s--;
+      while (e < term.cols - 1 && isWordChar(charAt(e + 1, row))) e++;
+      applyRange({ col: s, row }, { col: e, row });
+    };
+
+    const setNativeSelecting = (active) => {
+      if (window.Netcatty && window.Netcatty.setSelecting) window.Netcatty.setSelecting(active);
+    };
+
+    const exitSelect = (keep) => {
+      selecting = false;
+      selAnchor = null;
+      if (!keep) {
+        try { term.clearSelection(); } catch (e) {}
+        selbar.classList.remove("visible");
+      }
+      setNativeSelecting(false);
+    };
+
+    const enterSelect = (cell) => {
+      selecting = true;
+      selAnchor = cell;
+      didSelectThisGesture = true;
+      ime.blur();
+      selectWord(cell.col, cell.row);
+      setNativeSelecting(true);
+      markTerminalFocused();
+    };
+
+    const copySelection = () => {
+      const text = term.getSelection ? term.getSelection() : "";
+      if (window.Netcatty && window.Netcatty.copyText) window.Netcatty.copyText(text || "");
+      return !!text;
+    };
+
+    const focusIme = () => {
+      if (selecting) {
+        markTerminalFocused();
+        return;
+      }
+      pinHelper();
+      ime.focus({ preventScroll: true });
+      markTerminalFocused();
+    };
+
+    const notifyReady = () => {
+      try { fit.fit(); } catch (e) {}
+      focusIme();
+      if (window.Netcatty && window.Netcatty.onReady) {
+        window.Netcatty.onReady(term.cols, term.rows);
+      }
+    };
+    const onFit = () => {
+      try { fit.fit(); } catch (e) {}
+      if (window.Netcatty && window.Netcatty.onResize) {
+        window.Netcatty.onResize(term.cols, term.rows);
+      }
+    };
+    window.addEventListener("resize", onFit);
+    if (window.visualViewport) window.visualViewport.addEventListener("resize", onFit);
+
+    let pinchStartDist = 0;
+    let pinchStartFont = fontSize;
+    let pinchRaf = 0;
+    const touchDist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const applyFont = (size) => {
+      const next = clampFont(size);
+      if (next === fontSize) return;
+      fontSize = next;
+      if (pinchRaf) return;
+      pinchRaf = requestAnimationFrame(() => {
+        pinchRaf = 0;
+        term.options.fontSize = fontSize;
+        onFit();
+        try { localStorage.setItem("nc-font", String(fontSize)); } catch (e) {}
+      });
+    };
+    const fromSelBar = (event) => !!(event.target && event.target.closest && event.target.closest("#selbar"));
+
+    document.addEventListener("touchstart", (event) => {
+      if (fromSelBar(event)) return;
+      if (event.touches.length === 2) {
+        if (longTimer) {
+          clearTimeout(longTimer);
+          longTimer = 0;
+        }
+        pinchStartDist = touchDist(event.touches[0], event.touches[1]);
+        pinchStartFont = fontSize;
+        return;
+      }
+      if (event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
+      moved = false;
+      didSelectThisGesture = false;
+      if (selecting) {
+        selAnchor = cellAt(startX, startY);
+        applyRange(selAnchor, selAnchor);
+        return;
+      }
+      longTimer = setTimeout(() => {
+        longTimer = 0;
+        enterSelect(cellAt(startX, startY));
+      }, LONG_MS);
+    }, { passive: true });
+    document.addEventListener("touchmove", (event) => {
+      if (fromSelBar(event)) return;
+      if (event.touches.length === 2 && pinchStartDist >= 8) {
+        applyFont(pinchStartFont * (touchDist(event.touches[0], event.touches[1]) / pinchStartDist));
+        return;
+      }
+      if (event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      if (Math.hypot(touch.clientX - startX, touch.clientY - startY) > MOVE_PX) {
+        moved = true;
+        if (longTimer) {
+          clearTimeout(longTimer);
+          longTimer = 0;
+        }
+      }
+      if (selecting && selAnchor) {
+        applyRange(selAnchor, cellAt(touch.clientX, touch.clientY));
+      }
+    }, { passive: true });
+    document.addEventListener("touchend", (event) => {
+      if (fromSelBar(event)) return;
+      if (event.touches.length < 2) pinchStartDist = 0;
+      if (event.touches.length > 0) return;
+      if (longTimer) {
+        clearTimeout(longTimer);
+        longTimer = 0;
+      }
+      if (selecting) {
+        if (!moved && !didSelectThisGesture) {
+          exitSelect(false);
+          focusIme();
+        }
+        return;
+      }
+      if (!moved) focusIme();
+    }, { passive: true });
+    document.addEventListener("contextmenu", (event) => event.preventDefault());
+
+    ime.addEventListener("compositionstart", () => { composing = true; });
+    ime.addEventListener("compositionend", () => {
+      composing = false;
+      skipInput = true;
+      commitIme(ime.value, true);
+      setTimeout(() => { skipInput = false; }, 0);
+    });
+    ime.addEventListener("input", (event) => {
+      if (composing || skipInput) {
+        if (skipInput) ime.value = "";
+        return;
+      }
+      const type = event.inputType || "";
+      if (type === "insertReplacementText" || type === "insertFromSuggestion" || type === "insertFromSuggest") {
+        const value = ime.value;
+        ime.value = "";
+        const trimmed = value.replace(/[ \u00a0]+$/g, "");
+        if (trimmed && typedWord === trimmed) {
+          if (/[ \u00a0]$/.test(value)) send(" ");
+          return;
+        }
+      }
+      commitIme(ime.value, false);
+    });
+    ime.addEventListener("keydown", (event) => {
+      if (composing) return;
+      const special = {
+        Backspace: "\x7f",
+        Enter: "\r",
+        Tab: "\t",
+        Escape: "\x1b",
+        ArrowUp: "\x1b[A",
+        ArrowDown: "\x1b[B",
+        ArrowRight: "\x1b[C",
+        ArrowLeft: "\x1b[D",
+        Home: "\x1b[H",
+        End: "\x1b[F",
+        Delete: "\x1b[3~",
+      };
+      if (event.ctrlKey && event.key.length === 1) {
+        event.preventDefault();
+        send(String.fromCharCode(event.key.toLowerCase().charCodeAt(0) & 31));
+        return;
+      }
+      if (special[event.key]) {
+        event.preventDefault();
+        send(special[event.key]);
+      }
+    });
+
+    document.getElementById("sel-copy").addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      copySelection();
+    });
+    document.getElementById("sel-all").addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      selecting = true;
+      term.selectAll();
+      selbar.classList.add("visible");
+      setNativeSelecting(true);
+    });
+    document.getElementById("sel-clear").addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      exitSelect(false);
+      focusIme();
+    });
+    document.addEventListener("click", (event) => {
+      if (event.target && event.target.closest && event.target.closest("#selbar")) return;
+      if (!selecting) focusIme();
+    });
+    setInterval(() => {
+      pinHelper();
+      if (!selecting) markTerminalFocused();
+    }, 400);
+
+    window.netcattyWrite = (data) => term.write(data);
+    window.netcattyFocus = focusIme;
+    window.netcattyCopy = () => copySelection();
+    window.netcattyReadContext = (maxLines) => {
+      const buf = term.buffer.active;
+      const n = Math.max(1, Math.min(maxLines || 80, 400));
+      const start = Math.max(0, buf.length - n);
+      const lines = [];
+      for (let i = start; i < buf.length; i++) {
+        const line = buf.getLine(i);
+        lines.push(line ? line.translateToString(true) : "");
+      }
+      return lines.join("\n").replace(/\s+$/g, "");
+    };
+    window.netcattyFit = () => {
+      try { fit.fit(); } catch (e) {}
+      return JSON.stringify({ cols: term.cols, rows: term.rows });
+    };
+    requestAnimationFrame(notifyReady);
+  </script>
+</body>
+</html>

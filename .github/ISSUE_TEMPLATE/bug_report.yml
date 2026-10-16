@@ -1,0 +1,118 @@
+name: Bug Report
+description: Report a reproducible problem in Netcatty
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Incomplete reports may be closed automatically.
+        Please search [existing issues](https://github.com/binaricat/Netcatty/issues) first.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Netcatty version
+      description: Find it in Settings > Application, or on the [latest release](https://github.com/binaricat/Netcatty/releases/latest) page.
+      placeholder: "e.g. 1.2.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_source
+    attributes:
+      label: How did you install Netcatty?
+      options:
+        - GitHub Release (.dmg / .exe / .AppImage / .deb / .rpm / .pacman)
+        - Homebrew
+        - Built from source (npm run dev / pack)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - SSH connection / terminal
+        - SFTP / file browser
+        - Host vault / keychain
+        - Port forwarding
+        - Snippets
+        - AI assistant
+        - Settings / sync
+        - UI / layout
+        - Crash / app won't start
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: Can you reproduce it?
+      options:
+        - Always (100%)
+        - Often (>50%)
+        - Sometimes
+        - Once / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps so we can follow exactly.
+      placeholder: |
+        1. Open Netcatty and connect to host X
+        2. Click SFTP tab
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: |
+        Optional but helpful. Crash logs: Settings > System > Crash Logs > Open folder.
+        For SSH errors, include redacted connection details (no passwords / private keys).
+      placeholder: Paste relevant log lines or attach screenshots.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find a duplicate
+          required: true
+        - label: I removed passwords, private keys, and other secrets from this report
+          required: true

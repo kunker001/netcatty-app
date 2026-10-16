@@ -1,0 +1,2 @@
+-keep class net.schmizz.** { *; }
+-keep class org.bouncycastle.** { *; }

@@ -1,0 +1,228 @@
+# Plugin security and permission boundary
+
+Status: phase 3 internal preview (`0.1.0-internal`)
+
+This phase is available only with `NETCATTY_PLUGIN_DEV=1`. It is deliberately
+usable by later contribution and Provider phases, but it is not a public plugin
+release. There is no renderer permission UI yet. The first-party development
+bootstrap injects a native Electron confirmation dialog; embedders that do not
+inject a decision provider still fail closed.
+
+## Authority model
+
+Every privileged plugin-to-host method is registered in
+`PluginHostRpcRegistry` with one explicit authorization descriptor. Parameters
+are validated first; the descriptor is then built without probing protected
+host state, and quota and permission middleware run immediately before the
+handler. Filesystem and credential existence checks happen only after that
+permission boundary. An unclassified method is denied. The only current public
+method is bounded, redacted logging.
+
+The host supplies immutable plugin ID, version, runtime ID, placement, manifest,
+package root, cancellation signal, active-runtime guard, and security principal.
+Plugin payload fields can never replace that identity. The default pre-signature
+principal is a hash of plugin ID, declared publisher, and immutable package
+SHA-256, so changed unsigned code cannot inherit persistent grants. The
+placement seam also accepts a `resolveSecurityPrincipal` function so phase 9 can
+substitute a verified publisher-key fingerprint without changing the permission
+engine.
+
+The grant key includes:
+
+- plugin ID and permission;
+- canonical resource;
+- required-versus-optional declaration semantics and declared resource bounds;
+- the host-resolved security principal.
+
+Changing any declaration boundary or principal invalidates reuse. A renderer
+decision cannot grant a resource broader than the manifest declaration.
+Permission prompts use the canonical contract directly: absent operation and
+session IDs are omitted, long host-generated operation IDs become stable
+SHA-256 identifiers, reasons are bounded, and no request can carry more than
+128 canonical resources.
+Runtime trust/placement resolves before permission prompts. The special
+`runtime.advanced` permission is excluded from generic required-permission
+preflight and requested exactly once only when the host actually selects the
+utility runtime.
+
+## Grant lifetimes
+
+- `once` applies only to the request waiting on that decision and is not stored.
+- `session` is held in memory and requires a host-owned session ID; ending the
+  session removes it.
+- `application` is held in memory until explicit revoke or shutdown.
+- `always` is persisted in `plugin_permission_grants`.
+
+All lifetimes use the same resource-coverage function. Every resource carries
+an explicit `exact` or `directory` kind. Only a filesystem `directory` grant
+covers descendants with path-boundary comparison; a file remains exact even if
+the path is later replaced by a directory. Origins and companions are exact;
+`*` is valid only when the manifest declaration also allows it. Concurrent
+identical prompts coalesce. Prompt timeout, runtime abort,
+cancel, denial, absence of a decision provider, and stale activation all fail
+closed. Grant/use/deny/revoke events enter the bounded security audit.
+
+`PermissionRequest` is part of the canonical Schema and carries plugin display
+identity, version, runtime placement, permission, canonical resources and their
+aligned resource kinds, reason, operation and optional host session. This is
+the complete PR-4 UI handoff; the renderer must return the same request ID and
+one canonical lifetime decision. The native fallback visibly escapes control,
+line-separator, and bidirectional-control characters in every plugin-controlled
+display field so untrusted text cannot forge labels or resource lines.
+
+## Host-mediated capabilities
+
+These brokers are the only authority path for ordinary browser plugins. An
+advanced utility entrypoint is intentionally different: `runtime.advanced`
+means explicit consent to ambient Node, filesystem and network APIs in its
+contained process. Fine-grained broker grants do not sandbox that ambient Node
+authority. Phase 9 must also require a verified publisher principal before the
+advanced path can be publicly enabled.
+
+Required resource-scoped permissions (`network`, filesystem read/write, and
+companion execution) must declare non-empty activation-time resource bounds;
+the all-resources `*` wildcard is not a valid bound.
+The string shorthand remains available only for optional declarations, whose
+concrete resource is approved on first use. A package update therefore cannot
+activate first and defer a newly required resource decision until later.
+
+Native companions are an advanced-runtime capability. Their manifests require
+a Node utility entrypoint plus `runtime.advanced`, and `companion.start` rejects
+browser runtime identities before permission middleware can persist a grant.
+The first-party placement path selects the utility runtime whenever companions
+are declared, including manifests that also provide a browser entrypoint.
+The supervisor repeats the placement check immediately before reserving or
+spawning a process. Phase 9 adds verified publisher trust to this same boundary.
+Privileged Terminal interceptors use the same deterministic utility placement
+rule and additionally require their direction-specific interception grant.
+
+### Network
+
+The ordinary browser SDK has no direct network primitive. `network.request` supports
+HTTP(S) only, exact origin authorization, bounded headers, a 128 KiB request and
+response body, explicit timeout, no URL credentials, no ambient cookies, no
+transport headers, and manual redirects. Every redirect origin is authorized.
+The SDK forwards the validated request timeout as the host RPC deadline, so the
+router cancels stalled broker work at the same boundary.
+Cross-origin redirects strip sensitive headers; 301/302/303 transitions do not
+replay POST bodies as GET requests.
+
+### Filesystem
+
+Read, write, stat and directory listing require an absolute path. Authorization
+first uses only the lexically resolved requested path, including removal of
+redundant trailing separators, so an ungranted request cannot probe path
+existence, type, symlink targets or real paths. After permission,
+the handler resolves the real path and requires it to equal the authorized
+resource; callers must therefore supply an already canonical path and symlink
+aliases fail closed. File opens use `O_NOFOLLOW` where supported and bind the
+opened handle to both the pre-open authorized inode and the current path inode.
+Directory listing requires a host adapter that can bind both inode checks and
+enumeration to the same native directory handle. Portable Node does not expose
+that primitive, so the default implementation fails closed while preserving
+the SDK/RPC seam for a native adapter. Reads use the actual handle bytes rather
+than trusting a pre-read size, with a 128 KiB cap. Larger payloads use streams.
+Arbitrary-path writes currently require an existing regular file and explicit
+overwrite; no `O_CREAT` path exists because Node cannot portably bind creation
+to an opened parent-directory handle across macOS, Linux, and Windows. A later
+native implementation can add secure relative creation behind the same SDK
+method. Writes recheck runtime activity immediately before mutation, and
+listing is limited to 1,000 entries.
+
+### Secrets and credentials
+
+Secret values are encrypted with Electron `safeStorage`; unavailable OS
+encryption or Linux's insecure `basic_text` fallback denies the operation.
+SQLite stores ciphertext plus a `SecretRef` containing an opaque random ID and
+the non-secret originating key, never plaintext. The key lets lease permission
+checks use the same manifest resource as `secrets.get`/`set`; post-permission
+lookup revalidates that the random ID still belongs to that key and plugin.
+Secret tables and grants are user-owned security
+data and do not cascade when a package version is removed.
+
+Plugins can ask `PluginCredentialBroker` for a `SecretLeaseRef`. A lease is
+single-consumption, opaque, maximum 60 seconds, and bound to plugin, active
+runtime, operation ID, abort signal and secret ownership. Only a host capability
+broker can redeem it. A plugin-owned `SecretRef`, a Netcatty-owned opaque
+`CredentialRef`, or a lease ID alone is not authority. Netcatty credential
+references use an injected main-process resolver. Authorization treats both
+secret and credential IDs as opaque identifiers and does not reveal whether
+they exist; secret keys are already plugin-declared resources. Ownership,
+ID-to-key binding, and existence are checked only after permission,
+immediately before lease issue. Plaintext resolves only when the one-use lease
+is consumed. This is the stable credential handoff used by
+connection/authentication Providers in PR 7. Importer Providers cannot smuggle
+hidden built-in plaintext credentials through host drafts; credentials must be
+declared as identity/key drafts and then pass through the same host-owned
+encrypted persistence and credential-reference flow.
+
+### Companion executables
+
+Only the manifest variant matching the current OS/architecture can start. Its
+real path must remain inside the package, be a regular file, and match the
+declared SHA-256 immediately before spawn. The host uses an absolute executable,
+empty argument vector, private plugin data directory, minimal environment,
+`shell:false`, bounded Content-Length JSON-RPC, at most four processes per
+runtime and 64 pending calls per process. Companion-to-host methods receive
+method-not-found; privileged work remains in the main host brokers.
+Timed-out companion RPC identifiers are retired until one late response is
+discarded, and the runtime SDK retries a failed stop rather than marking the
+handle locally stopped before the host confirms cleanup.
+The validated companion request timeout is also forwarded as its host RPC
+deadline.
+
+On POSIX, companions start in a dedicated process group; shutdown signals the
+whole group, escalates the whole group to `SIGKILL`, and waits until it no longer
+exists. Windows uses shell-free `taskkill /T` for both graceful and forced tree
+cleanup. A direct parent exit also starts tree cleanup before the handle or
+quota monitor is released. An unreaped companion tree is a containment failure
+and disables its plugin. Runtime stop events revoke leases and release all owned
+companion handles. Disable, restart, upgrade and uninstall wait for that tree
+cleanup before returning or mutating package code; a cleanup failure is
+persisted as a containment failure and blocks replacement activation.
+
+## Quotas and failure behavior
+
+The raw-message token bucket runs before schema traversal. Capability
+concurrency/rate, logging rate, per-category byte windows, companion count and
+pending RPC limits bound retained work. Electron process metrics enforce memory
+and sustained-CPU policy for browser/utility runtimes and companion processes.
+The runtime monitor is attached and takes its first sample immediately when the
+BrowserWindow renderer or utility process is created, before initialize or
+activation runs. A process policy violation disables and stops only its owning
+plugin.
+
+Network, filesystem, secret, credential and companion handlers recheck the
+active runtime immediately before commits or returned results. Cancellation,
+disable, update, uninstall, quarantine and shutdown therefore cannot resume a
+stale privileged operation.
+
+## Initial database policy
+
+The plugin platform has never shipped. The complete current database remains
+schema version 1 and includes package/runtime tables plus grants, secrets and
+security audit. There is no migration chain. A developer using an older preview
+must reset `userData/plugins/plugins.sqlite`; released migrations begin only
+after durable user data can exist.
+
+## Downstream contracts
+
+- PR 4 consumes `PermissionRequest`, structured grant lists/revocation, runtime
+  events and the existing RPC registry for settings/commands/views. Secret
+  settings retain their declared key in `SecretRef` without exposing plaintext.
+- PRs 5-6 reuse immutable caller identity, permission middleware, cancellation,
+  quotas and runtime-stop cleanup; the direct terminal fast path remains a
+  separate MessagePort and must still enforce sensitive-input bypass. Their
+  larger payloads use streams rather than the 128 KiB control-plane budget.
+- PR 7 consumes operation-bound secret leases and digest-verified companions;
+  secret lease authorization uses the declared key while ID ownership remains
+  a post-permission lookup. Importers use bounded streams, not directory walks,
+  and their draft schemas reject executable startup commands and hidden
+  plaintext built-in credential fields before Vault persistence.
+- PR 8 stores encrypted sync sidecars in `plugin_sync_sidecars` (no package
+  cascade) for non-secret `sync: true` settings plus account/CRDT baselines, and
+  transports larger encrypted objects over the existing stream seam. Secret
+  settings never enter cloud sidecars.
+- PR 9 supplies signed publisher principals and trust policy through placement;
+  signed identity changes force a fresh grant instead of widening an unsigned
+  grant silently.

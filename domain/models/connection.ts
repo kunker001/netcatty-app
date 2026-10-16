@@ -1,0 +1,465 @@
+import type { SftpFilenameEncoding } from './sftp';
+import type { KeywordHighlightRule } from './terminal';
+
+// Proxy configuration for SSH connections
+type ProxyType = 'http' | 'socks5' | 'command';
+// UI locale identifier, stored in settings and used for i18n (e.g., "en", "zh-CN").
+export type UILanguage = string;
+
+export interface ProxyConfig {
+  type: ProxyType;
+  host: string;
+  port: number;
+  command?: string;
+  identityId?: string;
+  username?: string;
+  password?: string;
+}
+
+export interface ProxyProfile {
+  id: string;
+  label: string;
+  config: ProxyConfig;
+  createdAt: number;
+  updatedAt?: number;
+  order?: number;
+}
+
+// Host chain configuration for jump host / bastion connections
+export interface HostChainConfig {
+  hostIds: string[]; // Array of host IDs in order (first = closest to client)
+}
+
+export type MultiLineRunMode = 'lineDelay' | 'paste';
+
+// Per-host SSH algorithm override lists (advanced). Each property, when
+// present and non-empty, fully replaces the offered list for that category.
+// Category names mirror ssh2's `algorithms` shape (note: `compress`, not
+// `compression`). Empty arrays or missing properties keep the default.
+export interface HostAlgorithmOverrides {
+  kex?: string[];
+  cipher?: string[];
+  hmac?: string[];
+  serverHostKey?: string[];
+  compress?: string[];
+}
+
+// Environment variable for SSH session
+export interface EnvVar {
+  name: string;
+  value: string;
+}
+
+// Protocol type for connections
+export type BuiltInHostProtocol = 'ssh' | 'telnet' | 'mosh' | 'et' | 'local' | 'serial';
+export type PluginHostProtocol = `plugin:${string}`;
+export type HostProtocol = BuiltInHostProtocol | PluginHostProtocol;
+export type PluginConfigurationValue =
+  | null
+  | boolean
+  | number
+  | string
+  | PluginConfigurationValue[]
+  | { [key: string]: PluginConfigurationValue };
+
+export interface PluginConnectionConfig {
+  /** Exact namespaced connection Provider contribution ID. */
+  providerId: string;
+  /** Opaque, schema-validated Provider configuration retained if the plugin is absent. */
+  configuration: PluginConfigurationValue;
+  authenticationProviderId?: string;
+  /** Host-owned opaque credential reference; never plaintext. */
+  credentialId?: string;
+}
+export type HostIconMode = 'auto' | 'custom';
+export type HostIconColorMode = 'auto' | 'manual';
+export type HostIconId =
+  | 'server'
+  | 'terminal'
+  | 'database'
+  | 'cloud'
+  | 'router'
+  | 'shield'
+  | 'code'
+  | 'box'
+  | 'globe'
+  | 'cpu'
+  | 'hard-drive'
+  | 'network'
+  | 'wifi'
+  | 'lock'
+  | 'key'
+  | 'monitor'
+  | 'container'
+  | 'activity'
+  | 'zap'
+  | 'server-cog';
+export type HostIconColorId =
+  | 'blue'
+  | 'green'
+  | 'red'
+  | 'amber'
+  | 'purple'
+  | 'cyan'
+  | 'orange'
+  | 'slate'
+  | 'violet'
+  | 'pink'
+  | 'rose'
+  | 'lime'
+  | 'teal'
+  | 'sky'
+  | 'indigo'
+  | 'zinc';
+
+// Serial port configuration
+export type SerialParity = 'none' | 'even' | 'odd' | 'mark' | 'space';
+export type SerialFlowControl = 'none' | 'xon/xoff' | 'rts/cts';
+
+export interface SerialConfig {
+  path: string; // Serial port path (e.g., /dev/ttyUSB0, COM1)
+  baudRate: number; // Baud rate (e.g., 9600, 115200)
+  dataBits?: 5 | 6 | 7 | 8; // Data bits (default: 8)
+  stopBits?: 1 | 1.5 | 2; // Stop bits (default: 1)
+  parity?: SerialParity; // Parity (default: 'none')
+  flowControl?: SerialFlowControl; // Flow control (default: 'none')
+  localEcho?: boolean; // Force local echo (default: false, rely on remote echo)
+  lineMode?: boolean; // Line mode - buffer input and send on Enter (default: false)
+  // Store the default explicitly so an open/restored session keeps its launch-time behavior.
+  backspaceBehavior?: 'default' | 'ctrl-h';
+  // Byte-oriented backspace: when explicitly enabled, a Backspace deletes the
+  // whole multi-byte character by sending one DEL per wire byte (correct for
+  // MCUs/routers that remove bytes).  Set to false for character-aware line
+  // editors (e.g. a Linux console with readline) where one DEL already
+  // removes a whole character and repeating it would over-delete.
+  byteOrientedBackspace?: boolean;
+}
+
+// Per-protocol configuration
+interface ProtocolConfig {
+  protocol: HostProtocol;
+  port: number;
+  enabled: boolean;
+  // Mosh-specific
+  moshServerPath?: string;
+  // EternalTerminal-specific
+  etPort?: number;
+  // Protocol-specific theme override
+  theme?: string;
+}
+
+export interface SftpBookmark {
+  id: string;
+  path: string;
+  label: string;
+  global?: boolean;
+}
+
+export type HostAuthMethod = 'auto' | 'password' | 'key' | 'certificate';
+
+export type HostOperatingSystem = 'linux' | 'windows' | 'macos' | 'freebsd' | 'unknown';
+export type HostOsSelection = 'auto' | HostOperatingSystem;
+
+export interface Host {
+  id: string;
+  label: string;
+  hostname: string;
+  port?: number;
+  username: string;
+  // Optional reference to a reusable identity (username + auth) stored in Keychain.
+  identityId?: string;
+  group?: string;
+  tags: string[];
+  // Legacy compatibility value; use resolveHostOs for runtime decisions.
+  os: 'linux' | 'windows' | 'macos';
+  // Absent on old records: preserve Windows/macOS, treat old Linux defaults as auto.
+  osOverride?: HostOsSelection;
+  // Device type: 'general' for standard servers, 'network' for switches/routers/firewalls.
+  // Network devices use raw command execution (no shell wrapping) for AI agent compatibility.
+  deviceType?: 'general' | 'network';
+  identityFileId?: string; // Reference to SSHKey
+  protocol?: HostProtocol; // Default/primary protocol, including namespaced plugin protocols
+  pluginConnection?: PluginConnectionConfig;
+  // Runtime marker for in-memory-only hosts (e.g. password deep links).
+  // Ephemeral hosts are never persisted to the vault or session restore.
+  ephemeral?: boolean;
+  // Runtime hint for deep-link launches that target file transfer (e.g.
+  // JumpServer sftp payloads): auto-open the SFTP side panel on connect.
+  autoOpenSftpPanel?: boolean;
+  password?: string;
+  savePassword?: boolean; // Whether to save the password (default: true)
+  authMethod?: HostAuthMethod;
+  // Version 1 distinguishes the explicit per-host login choices from the
+  // legacy "password" default, which did not mean password-only.
+  authPolicyVersion?: 1;
+  // Prefer keyboard-interactive before the password method for MFA/PAM hosts.
+  requiresMfa?: boolean;
+  // Use the local SSH agent for login. This is separate from agentForwarding,
+  // which exposes the local agent to the remote host after login.
+  useSshAgent?: boolean;
+  // OpenSSH config metadata used for agent-backed authentication.
+  identityAgent?: string;
+  identitiesOnly?: boolean;
+  addKeysToAgent?: string;
+  useKeychain?: boolean;
+  agentForwarding?: boolean;
+  x11Forwarding?: boolean;
+  createdAt?: number; // Timestamp when host was created
+  startupCommand?: string;
+  startupCommandRunMode?: MultiLineRunMode;
+  /** Script id (kind=script) to run automatically after connect. */
+  loginScriptId?: string;
+  /** Ordered onConnect script IDs for this host (canonical run order). */
+  connectScriptIds?: string[];
+  /** Output regex triggers that launch scripts on terminal output. */
+  outputTriggers?: HostOutputTrigger[];
+  hostChaining?: string; // Deprecated: use hostChain instead
+  proxy?: string; // Deprecated: use proxyConfig instead
+  proxyProfileId?: string; // Reference to reusable proxy profile
+  proxyConfig?: ProxyConfig; // New structured proxy configuration
+  hostChain?: HostChainConfig; // New structured host chain configuration
+  envVars?: string; // Deprecated: use environmentVariables instead
+  environmentVariables?: EnvVar[]; // Structured environment variables
+  charset?: string;
+  moshEnabled?: boolean;
+  moshServerPath?: string; // Custom mosh-server path (e.g., /usr/local/bin/mosh-server)
+  etEnabled?: boolean;
+  etPort?: number; // EternalTerminal server port (default: 2022)
+  theme?: string;
+  themeOverride?: boolean; // Explicitly override the global terminal theme for this host
+  fontFamily?: string; // Terminal font family for this host
+  fontFamilyOverride?: boolean; // Explicitly override the global terminal font family for this host
+  fontSize?: number; // Terminal font size for this host (pt)
+  fontSizeOverride?: boolean; // Explicitly override the global terminal font size for this host
+  fontWeight?: number; // Terminal font weight for this host (100-900)
+  fontWeightOverride?: boolean; // Explicitly override the global terminal font weight for this host
+  distro?: string; // detected distro id (e.g., ubuntu, debian)
+  distroMode?: 'auto' | 'manual'; // whether distro icon comes from detection or manual override
+  manualDistro?: string; // manually selected distro id when distroMode='manual'
+  iconMode?: HostIconMode; // Optional host icon mode. Missing/auto preserves distro detection.
+  iconId?: HostIconId; // Curated icon override used when iconMode='custom'
+  iconColorMode?: HostIconColorMode; // Whether icon color follows the icon default or a manual override
+  iconColor?: HostIconColorId; // Palette color used when iconColorMode='manual'
+  iconColorCustom?: string; // Custom hex color used when iconColorMode='manual'
+  // Multi-protocol support
+  protocols?: ProtocolConfig[]; // Multiple protocol configurations
+  telnetPort?: number; // Telnet-specific port (for quick access)
+  telnetEnabled?: boolean; // Is Telnet enabled for this host
+  telnetIdentityId?: string; // Reference to a Telnet-specific reusable identity
+  telnetUsername?: string; // Telnet-specific username
+  telnetPassword?: string; // Telnet-specific password
+  // Serial-specific configuration (for protocol='serial' hosts)
+  serialConfig?: SerialConfig;
+  // SFTP specific configuration
+  sftpSudo?: boolean; // Use sudo for SFTP operations (requires password)
+  // Remote file browser protocol: Auto tries SFTP then falls back to SCP-mode
+  // (shell browse + scp -t/-f transfers) when the SFTP subsystem is unavailable.
+  sftpFileProtocol?: 'auto' | 'sftp' | 'scp';
+  sftpEncoding?: SftpFilenameEncoding; // Filename encoding for SFTP operations
+  sftpBookmarks?: SftpBookmark[]; // Bookmarked SFTP paths for quick navigation
+  sftpFollowTerminalCwd?: boolean; // Overrides global SFTP follow-terminal-directory setting
+  // Managed source: if this host is managed by an external file (e.g., ~/.ssh/config)
+  managedSourceId?: string; // Reference to ManagedSource.id
+  // Host-level keyword highlighting (overrides/extends global settings)
+  keywordHighlightRules?: KeywordHighlightRule[];
+  keywordHighlightEnabled?: boolean;
+  // Legacy SSH algorithm support for older network equipment (switches, routers)
+  legacyAlgorithms?: boolean;
+  // Drop every ecdsa-sha2-* from the offered host-key list. Some old Huawei
+  // VRP / Cisco IOS stacks negotiate ECDSA but produce signatures ssh2's
+  // strict RFC verifier rejects ("signature verification failed"). Forcing
+  // RSA / DSA / Ed25519 fallback restores compatibility — see #1027.
+  skipEcdsaHostKey?: boolean;
+  // Per-host SSH algorithm overrides (advanced). When a category's array is
+  // non-empty, it fully replaces the offered list for that category. Use
+  // sparingly — incorrect values make the host unreachable.
+  algorithms?: HostAlgorithmOverrides;
+  // Per-host SSH keepalive override. When `keepaliveOverride === true`, the
+  // host uses its own `keepaliveInterval` / `keepaliveCountMax` instead of
+  // inheriting the global TerminalSettings values. Lets a user keep an
+  // aggressive cloud-friendly keepalive globally while disabling it for a
+  // specific router / embedded device whose SSH stack doesn't reply to
+  // OpenSSH keepalive global requests (issue #581 / #939).
+  keepaliveInterval?: number; // Seconds; 0 = disabled
+  keepaliveCountMax?: number; // Unanswered keepalives before declaring dead
+  keepaliveOverride?: boolean;
+  // Per-host SSH connection timeouts. Missing values retain Netcatty defaults.
+  sshTcpConnectTimeoutSeconds?: number;
+  sshAuthReadyTimeoutSeconds?: number;
+  // Show local timestamps for this host beside terminal output rows.
+  // Kept per-host because timestamp visibility is usually a host/workflow preference.
+  showLineTimestamps?: boolean;
+  // What the Backspace key sends: undefined = xterm default (no interception), 'ctrl-h' = ^H (0x08)
+  backspaceBehavior?: 'ctrl-h';
+  // When true, tab titles stay on the connection label instead of following the
+  // shell-reported window title (OSC 0/2). Useful when many hosts share one
+  // bastion profile name.
+  disableDynamicTabTitle?: boolean;
+  // Local SSH key file paths (from SSH config IdentityFile or user-added)
+  // Resolved at connection time — the app reads the file content when connecting.
+  identityFilePaths?: string[];
+  // Pin host to top of All hosts view for quick access
+  pinned?: boolean;
+  // Timestamp of last successful connection, used for Recently Connected section
+  lastConnectedAt?: number;
+  // Per-session shell override for local terminals (from shell discovery)
+  localShell?: string;
+  localShellArgs?: string[];
+  localShellName?: string;
+  localShellIcon?: string;
+  localStartDir?: string;
+  /** User-authored Markdown notes (project, hardware, region, etc.) */
+  notes?: string;
+  order?: number;
+}
+
+export type KeyType = 'RSA' | 'ECDSA' | 'ED25519';
+type KeySource = 'generated' | 'imported' | 'reference';
+export type KeyCategory = 'key' | 'certificate' | 'identity';
+type IdentityAuthMethod = 'password' | 'key' | 'certificate';
+
+export interface SSHKey {
+  id: string;
+  label: string;
+  type: KeyType;
+  keySize?: number; // RSA: 4096/2048/1024, ECDSA: 521/384/256
+  privateKey: string;
+  publicKey?: string;
+  certificate?: string;
+  passphrase?: string; // encrypted or stored securely
+  savePassphrase?: boolean;
+  source: KeySource;
+  category: KeyCategory;
+  created: number;
+  filePath?: string;
+  order?: number;
+}
+
+// Identity combines username with authentication method
+export interface Identity {
+  id: string;
+  label: string;
+  username: string;
+  authMethod: IdentityAuthMethod;
+  password?: string; // For password auth
+  keyId?: string; // Reference to SSHKey for key/certificate auth
+  created: number;
+  order?: number;
+}
+
+export type SnippetKind = 'snippet' | 'script';
+export type SnippetMultiLineRunMode = MultiLineRunMode;
+export type ScriptLanguage = 'javascript' | 'python';
+export type ScriptTrigger = 'manual' | 'onConnect' | 'onOutput';
+
+export interface Snippet {
+  id: string;
+  label: string;
+  command: string; // Multi-line script or automation script source
+  tags?: string[];
+  package?: string; // package path
+  targets?: string[]; // host ids
+  /** Group paths resolved against the latest host inventory when the snippet runs. */
+  targetGroups?: string[];
+  /** When true, script/snippet applies to every connectable host (no per-host picker). */
+  targetsAllHosts?: boolean;
+  shortkey?: string; // Keyboard shortcut to send this snippet in terminal (e.g., "F1", "Ctrl + F1")
+  noAutoRun?: boolean; // If true, paste command without executing (no trailing Enter)
+  multiLineRunMode?: SnippetMultiLineRunMode; // Multi-line auto-run behavior; default is paste.
+  order?: number;
+  /** Default 'snippet' — static text paste. 'script' runs via nct automation engine. */
+  kind?: SnippetKind;
+  language?: ScriptLanguage;
+  description?: string;
+  trigger?: ScriptTrigger;
+  /** Regex pattern when trigger is 'onOutput'. */
+  triggerPattern?: string;
+}
+
+export interface HostOutputTrigger {
+  id: string;
+  pattern: string;
+  scriptId: string;
+}
+
+export interface VaultNote {
+  id: string;
+  title: string;
+  content: string;
+  group?: string;
+  tags?: string[];
+  linkedHostIds?: string[];
+  createdAt: number;
+  updatedAt: number;
+  order?: number;
+  isPinned?: boolean;
+}
+
+export interface ChatMessage {
+  role: 'user' | 'model';
+  text: string;
+}
+
+export interface GroupNode {
+  name: string;
+  path: string;
+  children: Record<string, GroupNode>;
+  hosts: Host[];
+  /** Pre-computed total host count including all descendants. Set during tree construction. */
+  totalHostCount?: number;
+}
+
+/** Default configuration for a group. Hosts in this group inherit these values when not explicitly set. */
+export interface GroupConfig {
+  path: string;
+  /** Markdown notes for this group only; not inherited by hosts or subgroups. */
+  notes?: string;
+  order?: number;
+  username?: string;
+  password?: string;
+  savePassword?: boolean;
+  authMethod?: HostAuthMethod;
+  identityId?: string;
+  identityFileId?: string;
+  identityFilePaths?: string[];
+  port?: number;
+  protocol?: 'ssh' | 'telnet';
+  deviceType?: 'general' | 'network';
+  agentForwarding?: boolean;
+  proxyProfileId?: string;
+  proxyConfig?: ProxyConfig;
+  hostChain?: HostChainConfig;
+  startupCommand?: string;
+  startupCommandRunMode?: MultiLineRunMode;
+  loginScriptId?: string;
+  legacyAlgorithms?: boolean;
+  skipEcdsaHostKey?: boolean;
+  algorithms?: HostAlgorithmOverrides;
+  environmentVariables?: EnvVar[];
+  charset?: string;
+  moshEnabled?: boolean;
+  moshServerPath?: string;
+  etEnabled?: boolean;
+  etPort?: number;
+  telnetEnabled?: boolean;
+  telnetPort?: number;
+  telnetIdentityId?: string;
+  telnetUsername?: string;
+  telnetPassword?: string;
+  theme?: string;
+  themeOverride?: boolean;
+  fontFamily?: string;
+  fontFamilyOverride?: boolean;
+  fontSize?: number;
+  fontSizeOverride?: boolean;
+  fontWeight?: number;
+  fontWeightOverride?: boolean;
+  backspaceBehavior?: 'ctrl-h';
+}
+
+export interface SyncConfig {
+  gistId: string;
+  githubToken: string;
+  gistToken?: string; // Alias for githubToken (deprecated, use githubToken)
+  lastSync?: number;
+}

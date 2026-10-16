@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Neutral gray rounded square -->
+  <rect width="32" height="32" rx="6" fill="#3C3C3C"/>
+  <!-- White >_ prompt -->
+  <text x="6" y="21" font-family="monospace" font-size="16" font-weight="bold" fill="#FFFFFF">&gt;_</text>
+</svg>

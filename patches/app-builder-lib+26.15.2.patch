@@ -1,0 +1,44 @@
+diff --git a/node_modules/app-builder-lib/out/util/electronGet.js b/node_modules/app-builder-lib/out/util/electronGet.js
+index c433dbb..1274151 100644
+--- a/node_modules/app-builder-lib/out/util/electronGet.js
++++ b/node_modules/app-builder-lib/out/util/electronGet.js
+@@ -252,12 +252,12 @@ async function downloadArtifactToFile(config, label) {
+                 interval: 2000,
+                 backoff: 2000,
+                 shouldRetry: (e) => {
+-                    var _a;
+                     if (e instanceof builder_util_runtime_1.HttpError) {
+                         return e.isServerError();
+                     }
+-                    if (typeof ((_a = e === null || e === void 0 ? void 0 : e.response) === null || _a === void 0 ? void 0 : _a.statusCode) === "number") {
+-                        return e.response.statusCode >= 500;
++                    const responseStatus = e?.response?.statusCode ?? e?.response?.status;
++                    if (typeof responseStatus === "number") {
++                        return responseStatus >= 500;
+                     }
+                     return typeof (e === null || e === void 0 ? void 0 : e.code) === "string" && ["ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "EPIPE", "ENOENT"].includes(e.code);
+                 },
+diff --git a/node_modules/app-builder-lib/out/codeSign/macCodeSign.js b/node_modules/app-builder-lib/out/codeSign/macCodeSign.js
+--- a/node_modules/app-builder-lib/out/codeSign/macCodeSign.js
++++ b/node_modules/app-builder-lib/out/codeSign/macCodeSign.js
+@@ -156,16 +156,16 @@
+     if (cscIKeyPassword != null) {
+         cscPasswords.push(cscIKeyPassword);
+     }
+-    return await importCerts(keychainFile, certPaths, cscPasswords);
+-}
+-async function importCerts(keychainFile, paths, keyPasswords) {
++    return await importCerts(keychainFile, certPaths, cscPasswords, keychainPassword);
++}
++async function importCerts(keychainFile, paths, keyPasswords, keychainPassword) {
+     var _a;
+     for (let i = 0; i < paths.length; i++) {
+         const password = (_a = keyPasswords[i]) !== null && _a !== void 0 ? _a : "";
+         await (0, builder_util_1.exec)("/usr/bin/security", ["import", paths[i], "-k", keychainFile, "-T", "/usr/bin/codesign", "-T", "/usr/bin/productbuild", "-P", password]);
+         // https://stackoverflow.com/questions/39868578/security-codesign-in-sierra-keychain-ignores-access-control-settings-and-ui-p
+         // https://github.com/electron-userland/electron-packager/issues/701#issuecomment-322315996
+-        await (0, builder_util_1.exec)("/usr/bin/security", ["set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, keychainFile]);
++        await (0, builder_util_1.exec)("/usr/bin/security", ["set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", keychainPassword, keychainFile]);
+     }
+     return {
+         keychainFile,

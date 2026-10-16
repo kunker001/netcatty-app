@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & general help
+    url: https://github.com/binaricat/Netcatty/discussions
+    about: Not sure if it is a bug? Ask in Discussions first.
+  - name: Latest release
+    url: https://github.com/binaricat/Netcatty/releases/latest
+    about: Check your Netcatty version before reporting.

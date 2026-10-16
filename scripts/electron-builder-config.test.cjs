@@ -1,0 +1,366 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
+
+const config = require("../electron-builder.config.cjs");
+
+test("unpacked runtime includes shared CommonJS dependencies", () => {
+  assert.ok(
+    config.asarUnpack.includes("lib/**/*.cjs"),
+    "main-process CommonJS helpers must stay unpacked",
+  );
+  assert.ok(
+    config.asarUnpack.includes("lib/**/*.json"),
+    "unpacked lib CommonJS modules require sibling JSON data files at runtime",
+  );
+});
+
+test("build.files includes shared terminal flow constants for main process", () => {
+  assert.ok(
+    config.files.includes("infrastructure/config/terminalFlowConstants.cjs"),
+    "terminalFlowAck.cjs requires infrastructure/config/terminalFlowConstants.cjs at packaged startup",
+  );
+  assert.ok(
+    config.files.includes("infrastructure/config/terminalFlowConstants.json"),
+    "terminalFlowConstants.cjs requires sibling terminalFlowConstants.json at packaged startup",
+  );
+});
+
+test("build.files includes the prompt classifier required by Mosh", () => {
+  assert.ok(
+    config.files.includes("domain/terminalPromptSecurity.shared.cjs"),
+    "packaged Mosh bootstrap requires the shared prompt classifier",
+  );
+  const promptSecurity = require("../domain/terminalPromptSecurity.shared.cjs");
+  assert.equal(promptSecurity.isUntrustedTerminalInputPrompt("验证码："), true);
+});
+
+test("build.files includes the single-channel SSH banner matcher", () => {
+  assert.ok(
+    config.files.includes("domain/singleChannelSshBanner.shared.cjs"),
+    "packaged SSH and SFTP bridges require the shared banner matcher",
+  );
+  assert.ok(
+    config.files.includes("domain/singleChannelSshBanner.shared.mjs"),
+    "the shared banner matcher requires its source module",
+  );
+  const banner = require("../domain/singleChannelSshBanner.shared.cjs");
+  assert.equal(banner.remoteSoftwareRequiresSingleChannel("BHostSSH_7.0"), true);
+  assert.equal(banner.remoteSoftwareRequiresSingleChannel("JumpServer"), false);
+});
+
+test("unpacked plugin runtime includes shared CommonJS helpers", () => {
+  assert.ok(
+    config.asarUnpack.includes("electron/shared/**/*"),
+    "shared Electron helpers must stay unpacked",
+  );
+});
+
+test("build.files excludes per-platform agent binaries", () => {
+  const files = config.files;
+  const expectExclusions = [
+    "!**/@anthropic-ai/claude-agent-sdk-*/**/*",
+    "!node_modules/@anthropic-ai/claude-code-*/**/*",
+    "!node_modules/@openai/codex-{darwin,linux,linuxmusl,win32}-*/**/*",
+    "!node_modules/@github/copilot-{darwin,linux,linuxmusl,win32}-*/**/*",
+    "!node_modules/@github/copilot/**/*",
+    "!node_modules/opencode-{darwin,linux,linuxmusl,windows}-*/**/*",
+    "!node_modules/opencode-ai/**/*",
+  ];
+  for (const glob of expectExclusions) {
+    assert.ok(
+      files.includes(glob),
+      `build.files must exclude platform binary glob: ${glob}`,
+    );
+  }
+});
+
+test("asarUnpack no longer references removed legacy agent packages", () => {
+  const unpack = config.asarUnpack.join("\n");
+  for (const stale of [
+    "@agentclientprotocol/claude-agent-acp",
+    "@agentclientprotocol/sdk",
+    "@zed-industries/codex-acp",
+  ]) {
+    assert.ok(
+      !unpack.includes(stale),
+      `asarUnpack must not reference removed package: ${stale}`,
+    );
+  }
+});
+
+test("asarUnpack keeps sqlite3 native module unpacked", () => {
+  assert.ok(config.asarUnpack.includes("node_modules/sqlite3/**/*"));
+});
+
+test("beforePack installs missing Cursor SDK packages and builds Windows Hello helper", () => {
+  assert.equal(config.beforePack, "./scripts/beforePackCursorSdk.cjs");
+});
+
+test("Windows packaging includes the Windows Hello helper executable", () => {
+  assert.ok(
+    Array.isArray(config.win.extraResources),
+    "win.extraResources must be an array",
+  );
+  assert.ok(
+    config.win.extraResources.some((entry) => (
+      entry &&
+      entry.from === "electron/bridges/windowsHelloHelper/build/${arch}/NetcattyWindowsHello.exe" &&
+      entry.to === "windowsHello/NetcattyWindowsHello.exe"
+    )),
+    "Windows package must include the Windows Hello helper executable for the target arch",
+  );
+  assert.ok(
+    config.files.includes("!electron/bridges/windowsHelloHelper/build/**/*"),
+    "Windows Hello build output must not also be copied into app.asar",
+  );
+});
+
+test("Windows package arch is controlled by pack script CLI flags", () => {
+  assert.deepEqual(
+    config.win.target,
+    ["nsis", "portable", "zip"],
+    "win.target must not hard-code x64 and arm64 or pack:win-x64 will still invoke arm64 beforePack hooks",
+  );
+});
+
+test("packaged app declares ssh, telnet, and jms URL protocol support", () => {
+  assert.deepEqual(config.protocols, [
+    {
+      name: "SSH URL",
+      schemes: ["ssh"],
+    },
+    {
+      name: "Telnet URL",
+      schemes: ["telnet"],
+    },
+    {
+      name: "JumpServer URL",
+      schemes: ["jms"],
+    },
+  ]);
+});
+
+test("build.files trims release-only dependency payloads", () => {
+  const files = config.files;
+  for (const glob of [
+    "!node_modules/@cursor/sdk/dist/cjs/**/*",
+    "!node_modules/@cursor/sdk/dist/**/*.d.ts",
+    "!node_modules/@cursor/sdk/dist/**/*.d.ts.map",
+    "!node_modules/sqlite3/deps/**/*",
+    "!node_modules/**/docs/**/*",
+    "!node_modules/**/doc/**/*",
+    "!node_modules/**/benchmark/**/*",
+    "!node_modules/**/benchmarks/**/*",
+  ]) {
+    assert.ok(files.includes(glob), `build.files must exclude release-only payload: ${glob}`);
+  }
+});
+
+test("build.files excludes Vite-bundled renderer-only packages", () => {
+  const files = config.files;
+  for (const glob of [
+    "!node_modules/react/**/*",
+    "!node_modules/react-dom/**/*",
+    "!node_modules/@radix-ui/**/*",
+    "!node_modules/ai/**/*",
+    "!node_modules/@ai-sdk/**/*",
+    "!node_modules/@mdxeditor/**/*",
+    "!node_modules/streamdown/**/*",
+    "!node_modules/@streamdown/**/*",
+    "!node_modules/@tanstack/react-virtual/**/*",
+    "!node_modules/pinyin-pro/**/*",
+    "!node_modules/re2js/**/*",
+    "!node_modules/@eslint-community/regexpp/**/*",
+    "!node_modules/clsx/**/*",
+    "!node_modules/tailwind-merge/**/*",
+    "!node_modules/use-stick-to-bottom/**/*",
+    "!node_modules/lexical/**/*",
+    "!node_modules/@lexical/**/*",
+    "!node_modules/@codemirror/**/*",
+    "!node_modules/katex/**/*",
+    "!node_modules/shiki/**/*",
+    "!node_modules/@shiki/**/*",
+  ]) {
+    assert.ok(
+      files.includes(glob),
+      `build.files must exclude Vite-bundled renderer package: ${glob}`,
+    );
+  }
+});
+
+test("KaTeX distribution keeps its license notice", () => {
+  const notice = readFileSync(
+    path.join(__dirname, "..", "public", "licenses", "KaTeX-LICENSE.txt"),
+    "utf8",
+  );
+  assert.match(notice, /Copyright \(c\) 2013-2020 Khan Academy and other contributors/);
+});
+
+test("linux packaging uses multi-size build/icons instead of a single 1024px override", async () => {
+  assert.equal(
+    config.linux.icon,
+    "icons",
+    "linux.icon must point at build/icons so electron-builder installs hicolor/* sizes",
+  );
+  assert.equal(config.directories.buildResources, "build");
+
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const iconsDir = path.join(__dirname, "..", "build", "icons");
+  for (const size of [16, 32, 48, 64, 128, 256, 512]) {
+    const file = path.join(iconsDir, `${size}x${size}.png`);
+    assert.ok(fs.existsSync(file), `expected Linux icon: build/icons/${size}x${size}.png`);
+  }
+
+  const { convertIcon } = require("app-builder-lib/out/util/iconConverter");
+  const projectDir = path.join(__dirname, "..");
+  const buildResources = path.join(projectDir, config.directories.buildResources);
+  const sources = [config.linux.icon, config.mac?.icon ?? config.icon].filter(Boolean);
+  const result = await convertIcon({
+    sources,
+    fallbackSources: [buildResources],
+    roots: [buildResources, projectDir],
+    format: "set",
+    outDir: path.join(projectDir, "release", ".icon-config-test"),
+  });
+  const sizes = result.icons.map((icon) => icon.size);
+  assert.ok(
+    sizes.includes(48) && sizes.includes(256) && !sizes.every((size) => size === 1024),
+    `expected standard hicolor sizes, got: ${sizes.join(", ")}`,
+  );
+});
+
+test("linux packaging includes an Arch Linux pacman package target", () => {
+  assert.deepEqual(
+    config.linux.target,
+    ["AppImage", "deb", "rpm", "pacman"],
+    "linux package builds must publish AppImage, Debian, RPM, and Arch pacman artifacts",
+  );
+});
+
+test("rpm packaging disables generated build-id symlinks", () => {
+  assert.deepEqual(
+    config.rpm?.fpm,
+    [
+      "--rpm-rpmbuild-define",
+      "_build_id_links none",
+      "--rpm-rpmbuild-define",
+      "__os_install_post %{nil}",
+    ],
+    "RPM packages must skip build-id links and host brp post scripts on RHEL builders",
+  );
+});
+
+test("rpm packaging uses gzip compression for RHEL-family package hosts", () => {
+  // Default electron-builder/fpm RPM compression is xzmt. AlmaLinux/RHEL 8 CI
+  // images provide `xz` but not the `xzmt` shim, which makes rpmbuild exit 127.
+  assert.equal(
+    config.rpm?.compression,
+    "gzip",
+    "RPM compression must avoid xzmt on RHEL 8 / AlmaLinux 8 package builders",
+  );
+});
+
+test("Windows package arch is controlled by pack script CLI flags", () => {
+  assert.deepEqual(
+    config.win.target,
+    ["nsis", "portable", "zip"],
+    "win.target must not hard-code x64 and arm64 or pack:win-x64 will still emit broken arm64 installers",
+  );
+});
+
+test("windows packaging includes a zip archive target", () => {
+  assert.ok(
+    config.win.target.includes("zip"),
+    "windows package builds must publish a zip archive for no-install environments",
+  );
+});
+
+test("windows installer registers and removes Explorer folder context menu entries", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  assert.equal(
+    config.nsis.include,
+    "build/installer.nsh",
+    "NSIS packaging must include the Explorer context-menu installer hooks",
+  );
+
+  const installerScript = fs.readFileSync(
+    path.join(__dirname, "..", config.nsis.include),
+    "utf8",
+  );
+  const folderKey = String.raw`Software\Classes\Directory\shell\Netcatty`;
+  const backgroundKey = String.raw`Software\Classes\Directory\Background\shell\Netcatty`;
+
+  assert.match(installerScript, /!macro customInstall\b/);
+  assert.match(installerScript, new RegExp(`WriteRegStr SHCTX "${folderKey.replaceAll("\\", "\\\\")}"`));
+  assert.match(installerScript, new RegExp(`WriteRegStr SHCTX "${backgroundKey.replaceAll("\\", "\\\\")}"`));
+  assert.match(installerScript, /-- --open-terminal-path="%1\."/);
+  assert.match(installerScript, /-- --open-terminal-path="%V\."/);
+
+  assert.match(installerScript, /!macro customUnInstall\b/);
+  assert.match(installerScript, new RegExp(`DeleteRegKey SHCTX "${folderKey.replaceAll("\\", "\\\\")}"`));
+  assert.match(installerScript, new RegExp(`DeleteRegKey SHCTX "${backgroundKey.replaceAll("\\", "\\\\")}"`));
+});
+
+test("windows zip follows the requested build architecture", () => {
+  const { Arch } = require("builder-util");
+  const { Platform } = require("app-builder-lib");
+  const { computeArchToTargetNamesMap } = require("app-builder-lib/out/targets/targetFactory");
+
+  const rawCliTargets = new Map([[Arch.x64, []]]);
+  const targetsByArch = computeArchToTargetNamesMap(
+    rawCliTargets,
+    {
+      platformSpecificBuildOptions: config.win,
+      defaultTarget: ["nsis"],
+    },
+    Platform.WINDOWS,
+  );
+
+  assert.deepEqual(
+    targetsByArch.get(Arch.x64)?.slice().sort(),
+    ["nsis", "portable", "zip"].sort(),
+    "pack:win-x64 must publish x64 nsis, portable, and zip",
+  );
+  assert.equal(
+    targetsByArch.has(Arch.arm64),
+    false,
+    "pack:win-x64 must not publish arm64 nsis/portable/zip without a dedicated arm64 job",
+  );
+});
+
+test("linux FPM packages use the custom post-install template", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  for (const [target, afterInstall] of Object.entries({
+    deb: config.deb.afterInstall,
+    rpm: config.rpm.afterInstall,
+    pacman: config.pacman.afterInstall,
+  })) {
+    assert.equal(
+      afterInstall,
+      "scripts/linux/after-install.tpl",
+      `${target}.afterInstall must point at the custom FPM post-install template`,
+    );
+  }
+  assert.equal(
+    config.pacman.afterRemove,
+    "scripts/linux/after-remove.tpl",
+    "pacman.afterRemove must point at the custom FPM post-remove template",
+  );
+
+  for (const relPath of [config.deb.afterInstall, config.pacman.afterRemove]) {
+    const file = path.join(__dirname, "..", relPath);
+    const contents = fs.readFileSync(file, "utf8");
+    assert.match(
+      contents,
+      /gtk-update-icon-cache.*\/usr\/share\/icons\/hicolor/,
+      `${relPath} must refresh the hicolor icon cache`,
+    );
+  }
+});

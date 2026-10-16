@@ -1,0 +1,197 @@
+/**
+ * SFTP File row component for file list
+ */
+
+import { Folder, Link } from 'lucide-react';
+import React, { memo, useCallback } from 'react';
+import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
+import { cn } from '../../lib/utils';
+import { SftpFileEntry } from '../../types';
+import {
+    sftpFileRowDensityClass,
+    sftpFileRowIconDensityClass,
+    type SftpListDensity,
+} from '../../domain/sftpListDensity';
+import { buildSftpColumnTemplate, formatBytes, formatDate, getFileIcon, isNavigableDirectory, type ColumnWidths, type SftpColumnVisibility } from './utils';
+
+interface SftpFileRowProps {
+    entry: SftpFileEntry;
+    index: number;
+    isSelected: boolean;
+    showSelectionHighlight: boolean;
+    isDragOver: boolean;
+    columnWidths: ColumnWidths;
+    visibleColumns: SftpColumnVisibility;
+    onSelect: (entry: SftpFileEntry, index: number, e: React.MouseEvent) => void;
+    onOpen: (entry: SftpFileEntry) => void;
+    onDragStart: (entry: SftpFileEntry, e: React.DragEvent) => void;
+    onDragEnd: () => void;
+    onDragOver: (entry: SftpFileEntry, e: React.DragEvent) => void;
+    onDragLeave: () => void;
+    onDrop: (entry: SftpFileEntry, e: React.DragEvent) => void;
+    density?: SftpListDensity;
+}
+
+const SftpFileRowInner: React.FC<SftpFileRowProps> = ({
+    entry,
+    index,
+    isSelected,
+    showSelectionHighlight,
+    isDragOver,
+    columnWidths,
+    visibleColumns,
+    onSelect,
+    onOpen,
+    onDragStart,
+    onDragEnd,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+    density = "comfortable",
+}) => {
+    const isParentDir = entry.name === '..';
+    // A symlink pointing to a directory behaves like a directory (navigable, accepts drops)
+    const isNavDir = isNavigableDirectory(entry);
+    const isSymlinkToDirectory = entry.type === 'symlink' && entry.linkTarget === 'directory';
+    const modifiedLabel = entry.lastModifiedFormatted || formatDate(entry.lastModified);
+    const sizeLabel = entry.sizeFormatted || formatBytes(entry.size);
+    const handleSelect = useCallback((e: React.MouseEvent) => {
+        onSelect(entry, index, e);
+    }, [entry, index, onSelect]);
+    const handleOpen = useCallback(() => {
+        onOpen(entry);
+    }, [entry, onOpen]);
+    const handleDragStart = useCallback((e: React.DragEvent) => {
+        onDragStart(entry, e);
+    }, [entry, onDragStart]);
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        onDragOver(entry, e);
+    }, [entry, onDragOver]);
+    const handleDrop = useCallback((e: React.DragEvent) => {
+        onDrop(entry, e);
+    }, [entry, onDrop]);
+    const isSelectionVisible = isSelected && showSelectionHighlight;
+
+    return (
+        <div
+            data-sftp-row="true"
+            data-section="terminal-sftp-list-row"
+            data-entry-name={entry.name}
+            data-selected={isSelected ? "true" : "false"}
+            data-entry-type={isNavDir ? "directory" : entry.type}
+            data-drag-over={isDragOver ? "true" : "false"}
+            draggable={!isParentDir}
+            onDragStart={handleDragStart}
+            onDragEnd={onDragEnd}
+            onDragOver={handleDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={handleDrop}
+            onClick={handleSelect}
+            onDoubleClick={handleOpen}
+            data-sftp-list-density={density}
+            className={cn(
+                "items-center cursor-pointer",
+                sftpFileRowDensityClass(density),
+                isSelectionVisible
+                    ? "bg-accent text-accent-foreground hover:bg-accent"
+                    : "hover:bg-accent/50",
+                isDragOver && isNavDir && "bg-primary/25 ring-1 ring-primary/50"
+            )}
+            style={{ display: 'grid', gridTemplateColumns: buildSftpColumnTemplate(columnWidths, visibleColumns) }}
+        >
+            <div className={cn("flex items-center min-w-0", density === "compact" ? "gap-2" : "gap-3")}>
+                <div className={cn(
+                    "rounded flex items-center justify-center shrink-0 relative",
+                    sftpFileRowIconDensityClass(density),
+                    isSelectionVisible
+                        ? "bg-accent-foreground/10 text-accent-foreground"
+                        : isNavDir
+                            ? "bg-primary/10 text-primary"
+                            : "bg-secondary/60 text-muted-foreground"
+                )}>
+                    {isNavDir ? <Folder size={14} /> : getFileIcon(entry)}
+                    {/* Show link indicator for symlinks */}
+                    {entry.type === 'symlink' && (
+                        <Link
+                            size={8}
+                            className={cn(
+                                "absolute -bottom-0.5 -right-0.5",
+                                isSelectionVisible ? "text-accent-foreground/80" : "text-muted-foreground",
+                            )}
+                            aria-hidden="true"
+                        />
+                    )}
+                </div>
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <span
+                            className={cn(
+                                "truncate cursor-default",
+                                entry.type === 'symlink' && "italic pr-1",
+                                isSelectionVisible && "font-medium",
+                            )}
+                        >
+                            {entry.name}
+                            {entry.type === 'symlink' && <span className="sr-only"> (symbolic link)</span>}
+                        </span>
+                    </TooltipTrigger>
+                    <TooltipContent>{entry.name}</TooltipContent>
+                </Tooltip>
+            </div>
+            {visibleColumns.modified && (
+                <span className={cn("text-xs truncate", isSelectionVisible ? "text-accent-foreground/85" : "text-muted-foreground")}>{modifiedLabel}</span>
+            )}
+            {visibleColumns.size && (
+                <span className={cn("text-xs truncate text-right", isSelectionVisible ? "text-accent-foreground/85" : "text-muted-foreground")}>
+                    {isNavDir ? '--' : sizeLabel}
+                </span>
+            )}
+            {visibleColumns.type && (
+                <span className={cn("text-xs truncate capitalize text-right", isSelectionVisible ? "text-accent-foreground/85" : "text-muted-foreground")}>
+                    {isSymlinkToDirectory ? 'link → folder' : entry.type === 'directory' ? 'folder' : entry.type === 'symlink' ? 'link' : entry.name.split('.').pop()?.toLowerCase() || 'file'}
+                </span>
+            )}
+            {visibleColumns.owner && (
+                <span className={cn("text-xs truncate text-right", isSelectionVisible ? "text-accent-foreground/85" : "text-muted-foreground")}>
+                    {isParentDir ? '' : (entry.owner || '--')}
+                </span>
+            )}
+        </div>
+    );
+};
+
+const areEqual = (prev: SftpFileRowProps, next: SftpFileRowProps): boolean => {
+    if (prev.index !== next.index) return false;
+    if (prev.isSelected !== next.isSelected) return false;
+    // Only re-render for showSelectionHighlight changes when the row is actually selected
+    if (prev.isSelected && prev.showSelectionHighlight !== next.showSelectionHighlight) return false;
+    if (prev.isDragOver !== next.isDragOver) return false;
+    if (prev.columnWidths.name !== next.columnWidths.name) return false;
+    if (prev.columnWidths.modified !== next.columnWidths.modified) return false;
+    if (prev.columnWidths.size !== next.columnWidths.size) return false;
+    if (prev.columnWidths.type !== next.columnWidths.type) return false;
+    if (prev.columnWidths.owner !== next.columnWidths.owner) return false;
+    if (prev.visibleColumns.modified !== next.visibleColumns.modified) return false;
+    if (prev.visibleColumns.size !== next.visibleColumns.size) return false;
+    if (prev.visibleColumns.type !== next.visibleColumns.type) return false;
+    if (prev.visibleColumns.owner !== next.visibleColumns.owner) return false;
+    // Compare callbacks - important for ".." entry which has static properties
+    if (prev.onOpen !== next.onOpen) return false;
+    if (prev.onSelect !== next.onSelect) return false;
+    if (prev.density !== next.density) return false;
+    const prevEntry = prev.entry;
+    const nextEntry = next.entry;
+    return (
+        prevEntry.name === nextEntry.name &&
+        prevEntry.type === nextEntry.type &&
+        prevEntry.size === nextEntry.size &&
+        prevEntry.lastModified === nextEntry.lastModified &&
+        prevEntry.linkTarget === nextEntry.linkTarget &&
+        prevEntry.sizeFormatted === nextEntry.sizeFormatted &&
+        prevEntry.lastModifiedFormatted === nextEntry.lastModifiedFormatted &&
+        prevEntry.owner === nextEntry.owner
+    );
+};
+
+export const SftpFileRow = memo(SftpFileRowInner, areEqual);
+SftpFileRow.displayName = 'SftpFileRow';

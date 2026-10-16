@@ -1,0 +1,858 @@
+/**
+ * Session Logs Bridge - Handles session log export and auto-save operations
+ * Provides functionality to export terminal logs to files and manage auto-save settings
+ */
+
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const { dialog } = require("electron");
+const {
+  terminalDataToHtmlContent,
+  terminalDataToPlainText,
+} = require("./terminalLogSanitizer.cjs");
+
+const FILE_NAME_UNSAFE_CHARS = new Set(["<", ">", ":", "\"", "/", "\\", "|", "?", "*"]);
+const WINDOWS_RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$/i;
+const manualSessionLogTokens = new Map();
+/** @type {Map<string, { sessionId: string, filePath: string, format: string, senderId: number | null }>} */
+const pendingManualSessionLogChoices = new Map();
+const SESSION_LOG_FORMATS = new Set(["txt", "raw", "html"]);
+
+function isControlCharacter(char) {
+  const code = char.codePointAt(0);
+  return code !== undefined && ((code >= 0 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f));
+}
+
+/**
+ * Get current Date to a local ISO-like string (YYYY-MM-DDTHH-MM-SS)
+ */
+function toLocalISOString(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  const seconds = pad(date.getSeconds());
+
+  return `${year}-${month}-${day}T${hours}-${minutes}-${seconds}`;
+}
+
+function safePathSegment(value, fallback = "unknown") {
+  const raw = String(value || "");
+  let safe = Array.from(raw, (char) => {
+    return FILE_NAME_UNSAFE_CHARS.has(char) || isControlCharacter(char) ? "_" : char;
+  }).join("").trim();
+
+  if (!safe || safe === "." || safe === "..") {
+    return fallback;
+  }
+
+  safe = safe.replace(/\.+$/g, (match) => "_".repeat(match.length));
+
+  if (WINDOWS_RESERVED_DEVICE_NAME.test(safe)) {
+    safe = `${safe}_`;
+  }
+
+  return safe;
+}
+
+/**
+ * Escape HTML special characters to prevent XSS
+ * Must be applied before converting ANSI codes to HTML spans
+ */
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function terminalPlainTextToHtml(plainText, hostLabel, timestamp) {
+  const htmlContent = escapeHtml(plainText || "");
+  return wrapTerminalHtmlContent(htmlContent, hostLabel, timestamp);
+}
+
+function buildExtendedForegroundPalette(htmlContent) {
+  const colors = new Set(Array.from(
+    htmlContent.matchAll(/var\(--term-custom-([a-f0-9]{6}), #[a-f0-9]{6}\)/g),
+    (match) => match[1],
+  ));
+  const light = [];
+  const dark = [];
+  for (const hex of colors) {
+    const channels = hex.match(/../g).map((channel) => parseInt(channel, 16));
+    const linearChannels = channels.map((channel) => {
+      const value = channel / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    const luminance = linearChannels[0] * 0.2126 + linearChannels[1] * 0.7152 + linearChannels[2] * 0.0722;
+    const maxLuminance = 1.05 / 4.5 - 0.05;
+    let adjusted = channels;
+    // A single linear-light scaling reaches the contrast target without an
+    // iterative search for every color on each streaming snapshot.
+    if (luminance > maxLuminance) {
+      const scale = maxLuminance / luminance;
+      adjusted = linearChannels.map((channel) => {
+        const value = channel * scale;
+        const srgb = value <= 0.0031308 ? value * 12.92 : 1.055 * value ** (1 / 2.4) - 0.055;
+        return Math.floor(srgb * 255);
+      });
+    }
+    const lightHex = adjusted.map((channel) => channel.toString(16).padStart(2, "0")).join("");
+    light.push(`--term-custom-${hex}: #${lightHex};`);
+    dark.push(`--term-custom-${hex}: #${hex};`);
+  }
+  return { light: light.join("\n      "), dark: dark.join("\n        ") };
+}
+
+function wrapTerminalHtmlContent(htmlContent, hostLabel, timestamp) {
+  const extendedPalette = buildExtendedForegroundPalette(htmlContent);
+  const dateStr = new Date(timestamp).toLocaleString();
+  const safeHostLabel = escapeHtml(hostLabel || "Unknown");
+  const safeDateStr = escapeHtml(dateStr);
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light dark">
+  <title>Session Log - ${safeHostLabel}</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      /* Day palette (default): readable on light browser/OS themes. */
+      --term-default-bg: #ffffff;
+      --term-default-fg: #24292f;
+      --term-header-fg: #6a737d;
+      --term-border: #d0d7de;
+      /* ANSI palette (basic 0-7, bright 8-15) tuned for the light background. */
+      --ansi-0: #000000;
+      --ansi-1: #cd3131;
+      --ansi-2: #008000;
+      --ansi-3: #747700;
+      --ansi-4: #0451a5;
+      --ansi-5: #bc05bc;
+      --ansi-6: #007c9b;
+      --ansi-7: #555555;
+      --ansi-8: #666666;
+      --ansi-9: #cd3131;
+      --ansi-10: #008500;
+      --ansi-11: #797600;
+      --ansi-12: #0451a5;
+      --ansi-13: #bc05bc;
+      --ansi-14: #007c9b;
+      --ansi-15: #767676;
+      ${extendedPalette.light}
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --term-default-bg: #1e1e1e;
+        --term-default-fg: #d4d4d4;
+        --term-header-fg: #888888;
+        --term-border: #444444;
+        --ansi-0: #000000;
+        --ansi-1: #cd3131;
+        --ansi-2: #0dbc79;
+        --ansi-3: #e5e510;
+        --ansi-4: #2472c8;
+        --ansi-5: #bc3fbc;
+        --ansi-6: #11a8cd;
+        --ansi-7: #e5e5e5;
+        --ansi-8: #666666;
+        --ansi-9: #f14c4c;
+        --ansi-10: #23d18b;
+        --ansi-11: #f5f543;
+        --ansi-12: #3b8eea;
+        --ansi-13: #d670d6;
+        --ansi-14: #29b8db;
+        --ansi-15: #ffffff;
+        ${extendedPalette.dark}
+      }
+    }
+    body {
+      background: var(--term-default-bg);
+      color: var(--term-default-fg);
+      font-family: ui-monospace, 'Cascadia Mono', 'JetBrains Mono', 'SF Mono',
+        Consolas, Monaco, Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 20px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .header {
+      border-bottom: 1px solid var(--term-border);
+      padding-bottom: 10px;
+      margin-bottom: 20px;
+      color: var(--term-header-fg);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    Host: ${safeHostLabel}<br>
+    Date: ${safeDateStr}
+  </div>
+  <div class="content">${htmlContent || ""}</div>
+</body>
+</html>`;
+}
+
+/**
+ * Convert terminal data to HTML after applying terminal text controls while
+ * preserving SGR styles such as color, bold, italic, and underline.
+ */
+function terminalDataToHtml(terminalData, hostLabel, timestamp) {
+  return wrapTerminalHtmlContent(terminalDataToHtmlContent(terminalData), hostLabel, timestamp);
+}
+
+/**
+ * Export a session log to a file (manual export via save dialog)
+ */
+async function exportSessionLog(event, payload) {
+  const { terminalData, hostLabel, hostname, startTime, format } = payload;
+
+  if (!terminalData && !(payload.plainText === true && terminalData === "")) {
+    throw new Error("No terminal data to export");
+  }
+
+  // Generate default filename
+  const date = new Date(startTime);
+  const dateStr = toLocalISOString(date);
+  const safeHostLabel = safePathSegment(hostLabel || hostname, "session");
+  const ext = format === "html" ? "html" : format === "raw" ? "log" : "txt";
+  const defaultPath = `${safeHostLabel}_${dateStr}.${ext}`;
+
+  // Show save dialog
+  const result = await dialog.showSaveDialog({
+    defaultPath,
+    filters: [
+      { name: "Text Files", extensions: ["txt"] },
+      { name: "Log Files", extensions: ["log"] },
+      { name: "HTML Files", extensions: ["html"] },
+      { name: "All Files", extensions: ["*"] },
+    ],
+  });
+
+  if (result.canceled || !result.filePath) {
+    return { success: false, canceled: true };
+  }
+
+  // Prepare content based on format
+  let content;
+  const actualFormat = path.extname(result.filePath).slice(1) || format;
+
+  if (actualFormat === "html") {
+    content = payload.plainText === true
+      ? terminalPlainTextToHtml(terminalData, hostLabel, startTime)
+      : terminalDataToHtml(terminalData, hostLabel, startTime);
+  } else if (actualFormat === "log" || actualFormat === "raw") {
+    // Raw format preserves ANSI codes
+    content = terminalData;
+  } else {
+    // Plain text - apply terminal text controls and remove escape sequences
+    content = payload.plainText === true ? terminalData : terminalDataToPlainText(terminalData);
+  }
+
+  await fs.promises.writeFile(result.filePath, content, "utf8");
+
+  return { success: true, filePath: result.filePath };
+}
+
+/**
+ * Select a directory for session logs storage
+ */
+async function selectSessionLogsDir(event) {
+  const result = await dialog.showOpenDialog({
+    properties: ["openDirectory", "createDirectory"],
+    title: "Select Session Logs Directory",
+  });
+
+  if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+    return { success: false, canceled: true };
+  }
+
+  return { success: true, directory: result.filePaths[0] };
+}
+
+/**
+ * Auto-save a session log to the configured directory
+ * Called when a terminal session ends
+ */
+async function autoSaveSessionLog(event, payload) {
+  const { terminalData, hostLabel, hostname, hostId, startTime, format, directory } = payload;
+
+  if (!terminalData || !directory) {
+    return { success: false, error: "Missing terminal data or directory" };
+  }
+
+  try {
+    // Create host subdirectory
+    const safeHostLabel = safePathSegment(hostLabel || hostname || hostId, "unknown");
+    const hostDir = path.join(directory, safeHostLabel);
+
+    await fs.promises.mkdir(hostDir, { recursive: true });
+
+    // Generate filename with timestamp
+    const date = new Date(startTime);
+    const dateStr = toLocalISOString(date);
+    const ext = format === "html" ? "html" : format === "raw" ? "log" : "txt";
+    const fileName = `${dateStr}.${ext}`;
+    const filePath = path.join(hostDir, fileName);
+
+    // Prepare content based on format
+    let content;
+    if (format === "html") {
+      content = terminalDataToHtml(terminalData, hostLabel, startTime);
+    } else if (format === "raw") {
+      content = terminalData;
+    } else {
+      content = terminalDataToPlainText(terminalData);
+    }
+
+    await fs.promises.writeFile(filePath, content, "utf8");
+
+    return { success: true, filePath };
+  } catch (err) {
+    console.error("Failed to auto-save session log:", err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Open the session logs directory in the system file explorer
+ */
+async function openSessionLogsDir(event, payload) {
+  const { shell } = require("electron");
+  const { directory } = payload;
+
+  if (!directory) {
+    return { success: false, error: "No directory specified" };
+  }
+
+  try {
+    // Check if directory exists
+    await fs.promises.access(directory);
+    await shell.openPath(directory);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// Auto-save writes `{hostDir}/{YYYY-MM-DDTHH-MM-SS}.{txt|log|html}`.
+// Manual export / continuous logs commonly write `{label}_{YYYY-MM-DDTHH-MM-SS}.{ext}`.
+const SESSION_LOG_TIMESTAMP_FILE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.(txt|log|html)$/i;
+const SESSION_LOG_LABELED_FILE = /^.+_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.(txt|log|html)$/i;
+
+/**
+ * True when a basename matches a Netcatty session-log artifact filename.
+ * Used so "clear all" never wipes unrelated files in a shared save directory.
+ */
+function isSessionLogArtifactName(name) {
+  const base = path.basename(String(name || ""));
+  return SESSION_LOG_TIMESTAMP_FILE.test(base) || SESSION_LOG_LABELED_FILE.test(base);
+}
+
+/**
+ * Live write targets from this process's sessionLogStreamManager.
+ * Main and terminal worker each own a separate module instance.
+ * @returns {string[]}
+ */
+function getLocalActiveLogPaths() {
+  const sessionLogStreamManager = require("./sessionLogStreamManager.cjs");
+  if (typeof sessionLogStreamManager.getActiveLogPaths !== "function") return [];
+  return sessionLogStreamManager.getActiveLogPaths()
+    .filter((p) => typeof p === "string" && p.length > 0)
+    .map((p) => path.resolve(p));
+}
+
+/**
+ * True when the terminal worker process is already running (or the manager
+ * does not expose a probe — unit-test mocks that only provide request()).
+ * Avoids cold-starting the utilityProcess solely for clear-all.
+ * @param {object|null} terminalWorkerManager
+ * @returns {boolean}
+ */
+function isTerminalWorkerRunning(terminalWorkerManager) {
+  if (!terminalWorkerManager) return false;
+  if (typeof terminalWorkerManager.isRunning === "function") {
+    return Boolean(terminalWorkerManager.isRunning());
+  }
+  // Mocks that only supply request() — treat as queryable.
+  return typeof terminalWorkerManager.request === "function";
+}
+
+/**
+ * Union of active log paths from the main process and the terminal worker.
+ * Worker-owned auto-save streams are invisible to the main-process manager.
+ * @param {object|null} terminalWorkerManager
+ * @returns {Promise<Set<string>>}
+ */
+async function collectActiveLogPaths(terminalWorkerManager = null) {
+  const activeLogPaths = new Set(getLocalActiveLogPaths());
+
+  if (!isTerminalWorkerRunning(terminalWorkerManager)) {
+    return activeLogPaths;
+  }
+
+  try {
+    const result = await terminalWorkerManager.request(
+      "netcatty:sessionLogs:getActivePaths",
+      {},
+      {},
+    );
+    const workerPaths = Array.isArray(result)
+      ? result
+      : (Array.isArray(result?.paths) ? result.paths : []);
+    for (const p of workerPaths) {
+      if (typeof p === "string" && p.length > 0) {
+        activeLogPaths.add(path.resolve(p));
+      }
+    }
+  } catch {
+    // Worker unavailable or channel missing — main-process paths only.
+  }
+
+  return activeLogPaths;
+}
+
+/**
+ * Delete known session-log artifacts inside the configured save directory
+ * (used by the "clear all logs" action in Settings).
+ *
+ * Only removes:
+ * - Top-level files matching session-log filename patterns
+ * - Host subdirectories that exclusively contain session-log files
+ * - Session-log files inside mixed host subdirectories (other entries kept)
+ *
+ * Never deletes unrelated top-level files/folders (e.g. Documents/Downloads
+ * when the user pointed the save directory at a shared folder).
+ *
+ * Active auto-save / continuous-log write targets are skipped so clear-all
+ * never unlinks a live stream (orphan inode / silent stop). Paths include
+ * both main-process streams and worker-owned streams when a terminal worker
+ * is running.
+ */
+async function clearSessionLogsDir(event, payload = {}, terminalWorkerManager = null) {
+  const { directory } = payload;
+
+  if (!directory) {
+    return { success: false, deletedCount: 0, failedCount: 0, error: "No directory specified" };
+  }
+
+  let deletedCount = 0;
+  let failedCount = 0;
+
+  // Live write targets (main + worker) — skip these paths.
+  const activeLogPaths = await collectActiveLogPaths(terminalWorkerManager);
+  const isActiveLogPath = (filePath) => activeLogPaths.has(path.resolve(filePath));
+
+  try {
+    const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+
+      // Skip anything that is not a plain file or directory (symlinks, sockets, …).
+      // Use dirent type when available; fall back to lstat for exotic FS entries.
+      let isFile = entry.isFile();
+      let isDirectory = entry.isDirectory();
+      if ((!isFile && !isDirectory) || entry.isSymbolicLink()) {
+        // Dirent may report the target type for some platforms; re-check with lstat
+        // so we never follow or delete symlink targets outside the save directory.
+        try {
+          const st = await fs.promises.lstat(entryPath);
+          if (st.isSymbolicLink()) continue;
+          isFile = st.isFile();
+          isDirectory = st.isDirectory();
+        } catch {
+          continue;
+        }
+      }
+      if (!isFile && !isDirectory) continue;
+
+      try {
+        if (isFile) {
+          if (!isSessionLogArtifactName(entry.name)) continue;
+          if (isActiveLogPath(entryPath)) continue;
+          await fs.promises.rm(entryPath, { force: true });
+          deletedCount++;
+          continue;
+        }
+
+        // Host subdirectory created by auto-save: only touch known log files.
+        const nested = await fs.promises.readdir(entryPath, { withFileTypes: true });
+        const logFiles = [];
+        let hasNonLogEntry = false;
+        let hasActiveLog = false;
+        const resolvedEntryPath = path.resolve(entryPath);
+
+        // txt/html streams may not create a file until the first snapshot flush, so
+        // the active path may be absent from readdir. Any registered active path
+        // whose parent is this host dir still counts as live work.
+        for (const activePath of activeLogPaths) {
+          if (path.dirname(activePath) === resolvedEntryPath) {
+            hasActiveLog = true;
+            break;
+          }
+        }
+
+        for (const nestedEntry of nested) {
+          const nestedPath = path.join(entryPath, nestedEntry.name);
+          let nestedIsFile = nestedEntry.isFile();
+          if (nestedEntry.isSymbolicLink() || (!nestedIsFile && !nestedEntry.isDirectory())) {
+            try {
+              const st = await fs.promises.lstat(nestedPath);
+              if (st.isSymbolicLink() || !st.isFile()) {
+                hasNonLogEntry = true;
+                continue;
+              }
+              nestedIsFile = true;
+            } catch {
+              hasNonLogEntry = true;
+              continue;
+            }
+          }
+          if (nestedIsFile && isSessionLogArtifactName(nestedEntry.name)) {
+            if (isActiveLogPath(nestedPath)) {
+              hasActiveLog = true;
+            } else {
+              logFiles.push(nestedPath);
+            }
+          } else {
+            hasNonLogEntry = true;
+          }
+        }
+
+        if (logFiles.length === 0 && !hasActiveLog) {
+          // Not an app host-log folder (or empty / only non-log content) — leave it alone.
+          continue;
+        }
+
+        if (!hasNonLogEntry && !hasActiveLog) {
+          // Pure session-log host folder with no live streams: remove as one artifact.
+          await fs.promises.rm(entryPath, { recursive: true, force: true });
+          deletedCount++;
+        } else {
+          // Mixed directory and/or active streams: only delete inactive known log files.
+          for (const logPath of logFiles) {
+            try {
+              await fs.promises.rm(logPath, { force: true });
+              deletedCount++;
+            } catch (err) {
+              failedCount++;
+              console.error(`[SessionLogs] Could not delete ${path.basename(logPath)}:`, err.message);
+            }
+          }
+        }
+      } catch (err) {
+        failedCount++;
+        console.error(`[SessionLogs] Could not delete ${entry.name}:`, err.message);
+      }
+    }
+    return { success: true, deletedCount, failedCount };
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      return { success: true, deletedCount: 0, failedCount: 0 };
+    }
+    console.error("[SessionLogs] Failed to clear session logs directory:", err);
+    return { success: false, deletedCount, failedCount, error: err.message };
+  }
+}
+
+/**
+ * Resolve a manual session-log destination via the save dialog (and optional
+ * overwrite confirm). Separated from stream start so the renderer can re-sample
+ * alternate-screen / initial-line state after the dialog closes.
+ *
+ * The selected path is stored only in the main process. Callers receive an
+ * opaque selectionToken for startManualSessionLog — renderer-supplied paths are
+ * never trusted for open/truncate.
+ */
+async function chooseManualSessionLogPath(event, payload = {}) {
+  const { sessionId, sessionName, preferredDirectory } = payload;
+  if (!sessionId) {
+    return { success: false, canceled: false, error: "Missing sessionId" };
+  }
+
+  const targetDirectory = typeof preferredDirectory === "string" && preferredDirectory.trim()
+    ? preferredDirectory.trim()
+    : require("node:os").homedir();
+  const format = SESSION_LOG_FORMATS.has(payload.format) ? payload.format : "raw";
+  const extension = format === "raw" ? "log" : format;
+  const displaySessionName = sessionName || sessionId;
+  const safeSessionName = safePathSegment(displaySessionName, "session");
+  const defaultPath = path.join(targetDirectory, `${safeSessionName}_${toLocalISOString(new Date())}.${extension}`);
+
+  try {
+    const result = await dialog.showSaveDialog({
+      defaultPath,
+      filters: [
+        { name: format === "txt" ? "Text Files" : format === "html" ? "HTML Files" : "Log Files", extensions: [extension] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+
+    if (result.canceled || !result.filePath) {
+      return { success: true, canceled: true };
+    }
+
+    const filePath = normalizeManualSessionLogFilePath(result.filePath, extension);
+    if (filePath !== result.filePath && !(await confirmManualSessionLogOverwrite(filePath))) {
+      return { success: true, canceled: true };
+    }
+
+    // Drop any prior unused selection for this session so only the latest dialog
+    // result can be redeemed.
+    for (const [token, pending] of pendingManualSessionLogChoices) {
+      if (pending.sessionId === sessionId) pendingManualSessionLogChoices.delete(token);
+    }
+
+    const selectionToken = crypto.randomBytes(16).toString("hex");
+    pendingManualSessionLogChoices.set(selectionToken, {
+      sessionId,
+      filePath,
+      format,
+      senderId: event?.sender?.id ?? null,
+    });
+
+    return {
+      success: true,
+      canceled: false,
+      selectionToken,
+      // Informational for UI/tests; start must redeem selectionToken, not this path.
+      filePath,
+      format,
+    };
+  } catch (err) {
+    return { success: false, canceled: false, error: err?.message || String(err) };
+  }
+}
+
+function redeemManualSessionLogSelection(event, sessionId, selectionToken) {
+  if (typeof selectionToken !== "string" || !selectionToken) return null;
+  const pending = pendingManualSessionLogChoices.get(selectionToken);
+  if (!pending || pending.sessionId !== sessionId) return null;
+  const senderId = event?.sender?.id;
+  if (pending.senderId != null && senderId != null && pending.senderId !== senderId) {
+    return null;
+  }
+  pendingManualSessionLogChoices.delete(selectionToken);
+  return pending;
+}
+
+async function startManualSessionLog(event, payload = {}) {
+  const sessionLogStreamManager = require("./sessionLogStreamManager.cjs");
+  const { sessionId, sessionName, preferredDirectory, initialLine } = payload;
+  if (!sessionId) {
+    return { success: false, started: false, error: "Missing sessionId" };
+  }
+
+  if (sessionLogStreamManager.hasStream(sessionId)) {
+    return { success: false, started: false, error: "Session log is already active" };
+  }
+
+  const displaySessionName = sessionName || sessionId;
+  let filePath = "";
+  let format = SESSION_LOG_FORMATS.has(payload.format) ? payload.format : "raw";
+
+  try {
+    if (typeof payload.selectionToken === "string" && payload.selectionToken) {
+      const pending = redeemManualSessionLogSelection(event, sessionId, payload.selectionToken);
+      if (!pending) {
+        return {
+          success: false,
+          started: false,
+          error: "Invalid or expired session log selection",
+        };
+      }
+      filePath = pending.filePath;
+      format = pending.format;
+    } else if (typeof payload.filePath === "string" && payload.filePath.trim()) {
+      // Do not trust renderer-supplied paths: they bypass the save dialog and
+      // overwrite confirmation and could truncate arbitrary writable files.
+      return {
+        success: false,
+        started: false,
+        error: "Session log path must be chosen via the save dialog",
+      };
+    } else {
+      // One-shot callers / tests: show the dialog and start immediately.
+      const chosen = await chooseManualSessionLogPath(event, {
+        sessionId,
+        sessionName,
+        preferredDirectory,
+        format,
+      });
+      if (!chosen.success) {
+        return { success: false, started: false, error: chosen.error || "Failed to choose session log path" };
+      }
+      if (chosen.canceled || !chosen.selectionToken) {
+        return { success: true, started: false, canceled: true };
+      }
+      const pending = redeemManualSessionLogSelection(event, sessionId, chosen.selectionToken);
+      if (!pending) {
+        return { success: false, started: false, error: "Invalid or expired session log selection" };
+      }
+      filePath = pending.filePath;
+      format = pending.format;
+    }
+
+    const startResult = sessionLogStreamManager.startStreamToFile(sessionId, {
+      filePath,
+      format,
+      hostLabel: displaySessionName,
+      startTime: Date.now(),
+      timestampsEnabled: Boolean(payload.timestampsEnabled),
+      initialLine: typeof initialLine === "string" ? initialLine : "",
+      separateInitialLineBeforeLeadingCarriageReturn: true,
+      stopRequiresToken: true,
+      // Caller should sample this after the save dialog resolves so enter/leave
+      // while the dialog is open does not seed a stale alternate-screen mode.
+      alternateScreenActive: payload.alternateScreenActive === true,
+    });
+
+    if (!startResult.ok) {
+      return { success: false, started: false, error: startResult.error || "Failed to start session log" };
+    }
+
+    manualSessionLogTokens.set(sessionId, startResult.token);
+    return { success: true, started: true, filePath };
+  } catch (err) {
+    return { success: false, started: false, error: err?.message || String(err) };
+  }
+}
+
+function normalizeManualSessionLogFilePath(filePath, extension = "log") {
+  return path.extname(filePath).toLowerCase() === `.${extension}` ? filePath : `${filePath}.${extension}`;
+}
+
+async function confirmManualSessionLogOverwrite(filePath) {
+  try {
+    await fs.promises.access(filePath, fs.constants.F_OK);
+  } catch (err) {
+    if (err?.code === "ENOENT") return true;
+    throw err;
+  }
+
+  const result = await dialog.showMessageBox({
+    type: "warning",
+    buttons: ["Overwrite", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: "Overwrite session log?",
+    message: `"${path.basename(filePath)}" already exists.`,
+    detail: "Choose Overwrite to replace it, or Cancel to keep the existing file.",
+  });
+
+  return result.response === 0;
+}
+
+async function stopManualSessionLog(event, payload = {}) {
+  const sessionLogStreamManager = require("./sessionLogStreamManager.cjs");
+  const { sessionId } = payload;
+  if (!sessionId) {
+    return { success: false, stopped: false, error: "Missing sessionId" };
+  }
+
+  try {
+    const token = manualSessionLogTokens.get(sessionId);
+    if (!token) {
+      return { success: true, stopped: false };
+    }
+
+    const filePath = await sessionLogStreamManager.stopStream(sessionId, token);
+    if (!filePath) {
+      if (!sessionLogStreamManager.hasStream(sessionId)) {
+        manualSessionLogTokens.delete(sessionId);
+        return { success: false, stopped: true, error: "Failed to finalize session log" };
+      }
+      return { success: true, stopped: false };
+    }
+    manualSessionLogTokens.delete(sessionId);
+    return { success: true, stopped: true, filePath };
+  } catch (err) {
+    return { success: false, stopped: false, error: err?.message || String(err) };
+  }
+}
+
+async function getManualSessionLogStatus(event, payload = {}) {
+  const sessionLogStreamManager = require("./sessionLogStreamManager.cjs");
+  const { sessionId } = payload;
+  if (!sessionId) {
+    return { success: false, isLogging: false, error: "Missing sessionId" };
+  }
+  return { success: true, isLogging: sessionLogStreamManager.hasStream(sessionId) };
+}
+
+/**
+ * Worker-side handlers only. The terminal utilityProcess has its own
+ * sessionLogStreamManager instance; main queries these paths before clear-all.
+ */
+function registerWorkerHandlers(ipcMain) {
+  ipcMain.handle("netcatty:sessionLogs:getActivePaths", async () => getLocalActiveLogPaths());
+}
+
+/**
+ * Register IPC handlers for session logs operations
+ */
+function registerHandlers(ipcMain, options = {}) {
+  const terminalWorkerManager = options.terminalWorkerManager || null;
+
+  ipcMain.handle("netcatty:sessionLogs:export", exportSessionLog);
+  ipcMain.handle("netcatty:sessionLogs:selectDir", selectSessionLogsDir);
+  ipcMain.handle("netcatty:sessionLogs:autoSave", autoSaveSessionLog);
+  ipcMain.handle("netcatty:sessionLogs:openDir", openSessionLogsDir);
+  ipcMain.handle(
+    "netcatty:sessionLogs:clear",
+    (event, payload) => clearSessionLogsDir(event, payload, terminalWorkerManager),
+  );
+  // Main can also answer this (manual / script streams) for symmetry / tests.
+  ipcMain.handle("netcatty:sessionLogs:getActivePaths", async () => getLocalActiveLogPaths());
+  ipcMain.handle("netcatty:sessionLog:manualChoosePath", chooseManualSessionLogPath);
+  ipcMain.handle("netcatty:sessionLog:manualStart", startManualSessionLog);
+  ipcMain.handle("netcatty:sessionLog:manualStop", stopManualSessionLog);
+  ipcMain.handle("netcatty:sessionLog:manualStatus", getManualSessionLogStatus);
+
+  // In the default terminal-worker runtime, sessions run in a utilityProcess
+  // and call appendData() on the worker's own sessionLogStreamManager module
+  // instance. Manual session logs (and script session logs) are started in
+  // the *main* process, so without this tap their streams never receive any
+  // terminal output — the saved file would only contain the initial prompt
+  // line captured from the renderer buffer (issue #1938). The worker already
+  // mirrors every output chunk to the main process for script output buffers;
+  // feed that same stream into the main-process log streams. appendData() is
+  // a no-op for sessions without an active main-process stream.
+  terminalWorkerManager?.addOutputTap?.((sessionId, data) => {
+    if (typeof data !== "string" || data.length === 0) return;
+    require("./sessionLogStreamManager.cjs").appendData(sessionId, data);
+  });
+}
+
+module.exports = {
+  registerHandlers,
+  registerWorkerHandlers,
+  exportSessionLog,
+  selectSessionLogsDir,
+  autoSaveSessionLog,
+  openSessionLogsDir,
+  clearSessionLogsDir,
+  collectActiveLogPaths,
+  getLocalActiveLogPaths,
+  isSessionLogArtifactName,
+  chooseManualSessionLogPath,
+  startManualSessionLog,
+  stopManualSessionLog,
+  getManualSessionLogStatus,
+  toLocalISOString,
+  terminalDataToHtml,
+  terminalPlainTextToHtml,
+  wrapTerminalHtmlContent,
+  safePathSegment,
+};

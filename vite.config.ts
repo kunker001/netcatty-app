@@ -1,0 +1,133 @@
+import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+import { defineConfig, type Plugin } from 'vite';
+
+// Custom plugin to suppress monaco-editor source map warnings
+const suppressMonacoSourcemapWarning = () => ({
+  name: 'suppress-monaco-sourcemap-warning',
+  apply: 'serve' as const,
+  configResolved(config: { logger: { warn: (msg: string, options?: { timestamp?: boolean }) => void } }) {
+    const originalWarn = config.logger.warn;
+    config.logger.warn = (msg: string, options?: { timestamp?: boolean }) => {
+      // Suppress monaco-editor source map warnings
+      if (msg.includes('monaco-editor') && msg.includes('source map')) return;
+      if (msg.includes('loader.js.map')) return;
+      originalWarn(msg, options);
+    };
+  },
+});
+
+const devContentSecurityPolicy = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+  "worker-src 'self' blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self' data:",
+  "connect-src 'self' data: blob: ws: wss: https: http://localhost:5173",
+  "img-src 'self' data: https:",
+].join("; ");
+
+const devContentSecurityPolicyPlugin = () => ({
+  name: 'dev-content-security-policy',
+  apply: 'serve' as const,
+  transformIndexHtml(html: string) {
+    return html.replace(
+      /content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' data: blob: ws: wss: https:; img-src 'self' data: https:;"/,
+      `content="${devContentSecurityPolicy}"`,
+    );
+  },
+});
+
+/**
+ * Stale pre-bundles return 504 after git pull / npm install. Vite retries the
+ * module once optimize finishes — do not full-reload the Electron window.
+ * A 504 on a stale optimize-dep used to flash the boot splash and wipe renderer state.
+ */
+const warnOnOutdatedOptimizeDep = (): Plugin => ({
+  name: 'warn-on-outdated-optimize-dep',
+  apply: 'serve',
+  configureServer(server) {
+    server.middlewares.use((req, res, next) => {
+      res.on('finish', () => {
+        if (
+          res.statusCode === 504
+          && req.url?.includes('/node_modules/.vite/deps/')
+        ) {
+          server.config.logger.warn(
+            `[vite] stale optimize dep 504 for ${req.url} (not reloading the app)`,
+          );
+        }
+      });
+      next();
+    });
+  },
+});
+
+export default defineConfig(() => {
+    return {
+      base: "./",
+      server: {
+        port: 5173,
+        host: 'localhost',
+        headers: {
+          // Required for SharedArrayBuffer and WASM in some browsers
+          'Cross-Origin-Opener-Policy': 'same-origin',
+          // Use credentialless to allow loading cross-origin images (e.g. Google avatars)
+          // while still enabling crossOriginIsolated.
+          'Cross-Origin-Embedder-Policy': 'credentialless',
+        },
+        hmr: {
+          overlay: true,
+        },
+      },
+      build: {
+        chunkSizeWarningLimit: 3000,
+        target: 'esnext', // Required for top-level await in WASM modules
+        sourcemap: false, // Disable source maps to avoid missing map file warnings
+        // Optimize chunk splitting for faster initial load
+        rollupOptions: {
+          output: {
+            manualChunks: {
+              // Vendor chunks - rarely change, can be cached aggressively
+              'vendor-radix': [
+                '@radix-ui/react-collapsible',
+                '@radix-ui/react-context-menu',
+                '@radix-ui/react-dialog',
+                '@radix-ui/react-popover',
+                '@radix-ui/react-scroll-area',
+                '@radix-ui/react-select',
+                '@radix-ui/react-tabs',
+              ],
+              'vendor-xterm': [
+                '@xterm/xterm',
+                '@xterm/addon-fit',
+                '@xterm/addon-image',
+                '@xterm/addon-ligatures',
+                '@xterm/addon-search',
+                '@xterm/addon-serialize',
+                '@xterm/addon-web-links',
+                '@xterm/addon-webgl',
+              ],
+              'vendor-zod': ['zod'],
+            },
+          },
+        },
+      },
+      plugins: [suppressMonacoSourcemapWarning(), devContentSecurityPolicyPlugin(), warnOnOutdatedOptimizeDep(), tailwindcss(), react()],
+      optimizeDeps: {
+        include: [
+          'zod',
+        ],
+      },
+      resolve: {
+        alias: {
+          '@': path.resolve(__dirname, '.'),
+          // The ligatures addon pulls lru-cache's node:diagnostics_channel import
+          // into the renderer bundle. Stub it; the cache never publishes metrics.
+          'node:diagnostics_channel': path.resolve(__dirname, 'infrastructure/shims/nodeDiagnosticsChannel.ts'),
+          'diagnostics_channel': path.resolve(__dirname, 'infrastructure/shims/nodeDiagnosticsChannel.ts'),
+        }
+      }
+    };
+});

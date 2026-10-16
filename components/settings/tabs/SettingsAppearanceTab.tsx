@@ -1,0 +1,608 @@
+import React, { memo, useCallback, useMemo, useState } from "react";
+import { applyCustomCssToDocument } from "../../../lib/customCss";
+import { DebouncedTextarea } from "../DebouncedTextarea";
+import { Check, HelpCircle, Monitor, Moon, Palette, Sun } from "lucide-react";
+import { useI18n } from "../../../application/i18n/I18nProvider";
+import { useStoredBoolean } from "../../../application/state/useStoredBoolean";
+import { useStoredString } from "../../../application/state/useStoredString";
+import { useStoredNumber } from "../../../application/state/useStoredNumber";
+import { DARK_UI_THEMES, LIGHT_UI_THEMES } from "../../../infrastructure/config/uiThemes";
+import { useAvailableUIFonts } from "../../../application/state/uiFontStore";
+import { useAvailableFonts } from "../../../application/state/fontStore";
+import { SUPPORTED_UI_LOCALES } from "../../../infrastructure/config/i18n";
+import { APP_ICON_VARIANT_ASSET_PATH, APP_ICON_VARIANT_GROUPS, APP_ICON_VARIANT_I18N_KEY } from "../../../infrastructure/config/appIconVariants";
+import {
+  STORAGE_KEY_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+  STORAGE_KEY_VAULT_NOTES_FONT_FAMILY,
+  STORAGE_KEY_VAULT_NOTES_FONT_SIZE,
+  STORAGE_KEY_VAULT_NOTES_CODE_FONT_SIZE,
+} from "../../../infrastructure/config/storageKeys";
+import { resolveAppIconVariant, type AppIconVariant } from "../../../domain/appIconVariant";
+import { resolveNoteFontSelectionFamily, resolveNoteFontSelectionId } from "../../../domain/noteFonts";
+import { DEFAULT_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS } from "../../../domain/systemKnownHostsAutoImport";
+import { cn } from "../../../lib/utils";
+import { SectionHeader, SettingsAnchor, SettingsTabContent, SettingRow, Toggle, Select } from "../settings-ui";
+import { FontSelect } from "../FontSelect";
+import { TerminalFontSelect } from "../TerminalFontSelect";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "../../ui/dialog";
+import { NoteProse } from "../../notes/NoteProse";
+
+const CUSTOM_CSS_HELP_PROSE_CLASS =
+  "text-xs text-foreground/90 leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0";
+
+function SettingsAppearanceTab(props: {
+  theme: "dark" | "light" | "system";
+  resolvedTheme: "dark" | "light";
+  setTheme: (theme: "dark" | "light" | "system") => void;
+  lightUiThemeId: string;
+  setLightUiThemeId: (themeId: string) => void;
+  darkUiThemeId: string;
+  setDarkUiThemeId: (themeId: string) => void;
+  accentMode: "theme" | "custom";
+  setAccentMode: (mode: "theme" | "custom") => void;
+  customAccent: string;
+  setCustomAccent: (color: string) => void;
+  uiFontFamilyId: string;
+  setUiFontFamilyId: (fontId: string) => void;
+  uiLanguage: string;
+  setUiLanguage: (language: string) => void;
+  customCSS: string;
+  setCustomCSS: (css: string) => void;
+  showRecentHosts: boolean;
+  setShowRecentHosts: (enabled: boolean) => void;
+  hostClickBehavior: "connect" | "select";
+  setHostClickBehavior: (behavior: "connect" | "select") => void;
+  showOnlyUngroupedHostsInRoot: boolean;
+  setShowOnlyUngroupedHostsInRoot: (enabled: boolean) => void;
+  showSftpTab: boolean;
+  setShowSftpTab: (enabled: boolean) => void;
+  showHostTreeSidebar: boolean;
+  setShowHostTreeSidebar: (enabled: boolean) => void;
+  windowOpacity: number;
+  setWindowOpacity: (opacity: number) => void;
+  appIconVariant: AppIconVariant;
+  setAppIconVariant: (variant: AppIconVariant) => void;
+}) {
+  const { t } = useI18n();
+  const availableUIFonts = useAvailableUIFonts();
+  // Note code fonts come from the monospace-only store (fontStore); the note
+  // body font follows the UI font setting instead.
+  const availableMonoFonts = useAvailableFonts();
+  const noteFontOptions = useMemo(() => [
+    { id: "", name: t("notes.toolbar.defaultFont"), family: "", description: "", category: "monospace" as const },
+    ...availableMonoFonts,
+  ], [availableMonoFonts, t]);
+  const [customCssHelpOpen, setCustomCssHelpOpen] = useState(false);
+  const [autoImportSystemKnownHosts, setAutoImportSystemKnownHosts] = useStoredBoolean(
+    STORAGE_KEY_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+    DEFAULT_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+  );
+  const [noteFontFamily, setNoteFontFamily] = useStoredString<string>(
+    STORAGE_KEY_VAULT_NOTES_FONT_FAMILY,
+    "",
+  );
+  const [noteFontSize, setNoteFontSize, persistNoteFontSize] = useStoredNumber(
+    STORAGE_KEY_VAULT_NOTES_FONT_SIZE,
+    14,
+    { min: 10, max: 32 },
+  );
+  const handleSetNoteFontSize = useCallback((size: number) => {
+    setNoteFontSize(size);
+    persistNoteFontSize(size);
+  }, [persistNoteFontSize, setNoteFontSize]);
+  const [noteCodeFontSize, setNoteCodeFontSize, persistNoteCodeFontSize] = useStoredNumber(
+    STORAGE_KEY_VAULT_NOTES_CODE_FONT_SIZE,
+    13,
+    { min: 10, max: 32 },
+  );
+  const handleSetNoteCodeFontSize = useCallback((size: number) => {
+    setNoteCodeFontSize(size);
+    persistNoteCodeFontSize(size);
+  }, [persistNoteCodeFontSize, setNoteCodeFontSize]);
+  const {
+    theme,
+    resolvedTheme,
+    setTheme,
+    lightUiThemeId,
+    setLightUiThemeId,
+    darkUiThemeId,
+    setDarkUiThemeId,
+    accentMode,
+    setAccentMode,
+    customAccent,
+    setCustomAccent,
+    uiFontFamilyId,
+    setUiFontFamilyId,
+    uiLanguage,
+    setUiLanguage,
+    customCSS,
+    setCustomCSS,
+    showRecentHosts,
+    setShowRecentHosts,
+    hostClickBehavior,
+    setHostClickBehavior,
+    showOnlyUngroupedHostsInRoot,
+    setShowOnlyUngroupedHostsInRoot,
+    showSftpTab,
+    setShowSftpTab,
+    showHostTreeSidebar,
+    setShowHostTreeSidebar,
+    windowOpacity,
+    setWindowOpacity,
+    appIconVariant,
+    setAppIconVariant,
+  } = props;
+  const resolvedAppIconVariant = resolveAppIconVariant(appIconVariant);
+
+  const WINDOW_OPACITY_PRESETS = [
+    { label: '100%', value: 1 },
+    { label: '85%', value: 0.85 },
+    { label: '70%', value: 0.7 },
+  ] as const;
+
+  const getHslStyle = useCallback((hsl: string) => ({ backgroundColor: `hsl(${hsl})` }), []);
+
+  const hexToHsl = useCallback((hex: string) => {
+    const r = parseInt(hex.slice(1, 3), 16) / 255;
+    const g = parseInt(hex.slice(3, 5), 16) / 255;
+    const b = parseInt(hex.slice(5, 7), 16) / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    let h = 0;
+    let s = 0;
+    const l = (max + min) / 2;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      switch (max) {
+        case r:
+          h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+          break;
+        case g:
+          h = ((b - r) / d + 2) / 6;
+          break;
+        case b:
+          h = ((r - g) / d + 4) / 6;
+          break;
+      }
+    }
+    return `${Math.round(h * 360)} ${Math.round(s * 100)}% ${Math.round(l * 100)}%`;
+  }, []);
+
+  const ACCENT_COLORS = [
+    { name: "Sky", value: "199 89% 48%" },
+    { name: "Blue", value: "221.2 83.2% 53.3%" },
+    { name: "Indigo", value: "234 89% 62%" },
+    { name: "Violet", value: "262.1 83.3% 57.8%" },
+    { name: "Purple", value: "271 81% 56%" },
+    { name: "Fuchsia", value: "292 84% 61%" },
+    { name: "Pink", value: "330 81% 60%" },
+    { name: "Rose", value: "346.8 77.2% 49.8%" },
+    { name: "Red", value: "0 84.2% 60.2%" },
+    { name: "Orange", value: "24.6 95% 53.1%" },
+    { name: "Amber", value: "38 92% 50%" },
+    { name: "Yellow", value: "48 96% 53%" },
+    { name: "Lime", value: "84 81% 44%" },
+    { name: "Green", value: "142.1 76.2% 36.3%" },
+    { name: "Emerald", value: "160 84% 39%" },
+    { name: "Teal", value: "173 80% 40%" },
+    { name: "Cyan", value: "189 94% 43%" },
+    { name: "Slate", value: "215 16% 47%" },
+  ];
+
+  const THEME_OPTIONS: { value: "light" | "system" | "dark"; icon: React.ReactNode; label: string }[] = [
+    { value: "light", icon: <Sun size={14} />, label: t("settings.appearance.theme.light") },
+    { value: "system", icon: <Monitor size={14} />, label: t("settings.appearance.theme.system") },
+    { value: "dark", icon: <Moon size={14} />, label: t("settings.appearance.theme.dark") },
+  ];
+
+  const renderThemeSwatches = (
+    options: { id: string; name: string; tokens: { background: string } }[],
+    value: string,
+    onChange: (next: string) => void,
+  ) => (
+    <div className="flex min-w-0 flex-1 flex-wrap justify-end gap-2">
+      {options.map((preset) => (
+        <Tooltip key={preset.id}>
+          <TooltipTrigger asChild>
+            <button
+              onClick={() => onChange(preset.id)}
+              className={cn(
+                "w-6 h-6 rounded-full flex items-center justify-center transition-all shadow-sm border border-border/70",
+                value === preset.id
+                  ? "ring-2 ring-offset-2 ring-foreground scale-110"
+                  : "hover:scale-105",
+              )}
+              style={getHslStyle(preset.tokens.background)}
+            >
+              {value === preset.id && <Check className="text-white drop-shadow-md" size={10} />}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>{preset.name}</TooltipContent>
+        </Tooltip>
+      ))}
+    </div>
+  );
+
+  const visibleUiThemes = resolvedTheme === "dark" ? DARK_UI_THEMES : LIGHT_UI_THEMES;
+  const visibleUiThemeId = resolvedTheme === "dark" ? darkUiThemeId : lightUiThemeId;
+  const setVisibleUiThemeId = resolvedTheme === "dark" ? setDarkUiThemeId : setLightUiThemeId;
+
+  return (
+    <SettingsTabContent value="appearance">
+      <SectionHeader title={t("settings.appearance.language")} />
+      <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow
+          anchorId="appearance-language"
+          label={t("settings.appearance.language")}
+          description={t("settings.appearance.language.desc")}
+        >
+          <Select
+            value={uiLanguage}
+            options={SUPPORTED_UI_LOCALES.map((l) => ({ value: l.id, label: l.label }))}
+            onChange={(v) => setUiLanguage(v)}
+            className="w-40"
+          />
+        </SettingRow>
+        <SettingRow
+          anchorId="appearance-ui-font"
+          label={t("settings.appearance.uiFont")}
+          description={t("settings.appearance.uiFont.desc")}
+        >
+          <FontSelect
+            value={uiFontFamilyId}
+            fonts={availableUIFonts}
+            onChange={(v) => setUiFontFamilyId(v)}
+            className="w-48"
+            ariaLabel={t("settings.appearance.uiFont")}
+          />
+        </SettingRow>
+      </div>
+
+      <SectionHeader title={t("settings.appearance.windowOpacity")} />
+      <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow
+          anchorId="appearance-window-opacity"
+          label={t("settings.appearance.windowOpacity")}
+          description={t("settings.appearance.windowOpacity.desc")}
+        >
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={50}
+                max={100}
+                step={1}
+                value={Math.round(windowOpacity * 100)}
+                onChange={(e) => setWindowOpacity(Number(e.target.value) / 100)}
+                className="w-28 accent-primary"
+              />
+              <span className="text-sm text-muted-foreground w-10 text-right tabular-nums">
+                {Math.round(windowOpacity * 100)}%
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {WINDOW_OPACITY_PRESETS.map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => setWindowOpacity(preset.value)}
+                  className={cn(
+                    "px-2.5 py-1 rounded-md text-xs font-medium transition-colors border",
+                    windowOpacity === preset.value
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "bg-muted/50 text-muted-foreground border-border hover:text-foreground",
+                  )}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </SettingRow>
+      </div>
+
+      <SectionHeader title={t("settings.appearance.uiTheme")} />
+      <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow anchorId="appearance-theme" label={t("settings.appearance.theme")}>
+          <div className="flex items-center rounded-lg border border-border bg-muted/50 p-0.5">
+            {THEME_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setTheme(opt.value)}
+                className={cn(
+                  "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors",
+                  theme === opt.value
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {opt.icon}
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </SettingRow>
+        <SettingsAnchor anchorId="appearance-theme-color">
+          <div className="flex items-start justify-between gap-4 py-3">
+            <div className="shrink-0 pt-0.5 text-sm font-medium">
+              {resolvedTheme === "dark"
+                ? t("settings.appearance.themeColor.dark")
+                : t("settings.appearance.themeColor.light")}
+            </div>
+            {renderThemeSwatches(visibleUiThemes, visibleUiThemeId, setVisibleUiThemeId)}
+          </div>
+        </SettingsAnchor>
+        <SettingRow
+          anchorId="appearance-accent-mode"
+          label={t("settings.appearance.accentColor.mode")}
+          description={t("settings.appearance.accentColor.mode.desc")}
+        >
+          <div className="flex items-center gap-2">
+            <Toggle
+              checked={accentMode === "custom"}
+              onChange={(checked) => setAccentMode(checked ? "custom" : "theme")}
+            />
+          </div>
+        </SettingRow>
+        {accentMode === "custom" && (
+          <div className="py-3 space-y-2">
+            <div className="text-sm font-medium">{t("settings.appearance.accentColor.custom")}</div>
+            <div className="flex flex-wrap gap-2">
+              {ACCENT_COLORS.map((c) => (
+                <Tooltip key={c.name}>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={() => setCustomAccent(c.value)}
+                      className={cn(
+                        "w-6 h-6 rounded-full flex items-center justify-center transition-all shadow-sm",
+                        customAccent === c.value
+                          ? "ring-2 ring-offset-2 ring-foreground scale-110"
+                          : "hover:scale-105",
+                      )}
+                      style={getHslStyle(c.value)}
+                    >
+                      {customAccent === c.value && <Check className="text-white drop-shadow-md" size={10} />}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>{c.name}</TooltipContent>
+                </Tooltip>
+              ))}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <label
+                    className={cn(
+                      "w-6 h-6 rounded-full flex items-center justify-center transition-all shadow-sm cursor-pointer",
+                      "bg-gradient-to-br from-pink-500 via-purple-500 to-blue-500",
+                      !ACCENT_COLORS.some((c) => c.value === customAccent)
+                        ? "ring-2 ring-offset-2 ring-foreground scale-110"
+                        : "hover:scale-105",
+                    )}
+                  >
+                    <input
+                      type="color"
+                      className="sr-only"
+                      onChange={(e) => setCustomAccent(hexToHsl(e.target.value))}
+                    />
+                    {!ACCENT_COLORS.some((c) => c.value === customAccent) ? (
+                      <Check className="text-white drop-shadow-md" size={10} />
+                    ) : (
+                      <Palette size={12} className="text-white drop-shadow-md" />
+                    )}
+                  </label>
+                </TooltipTrigger>
+                <TooltipContent>{t("settings.appearance.customColor")}</TooltipContent>
+              </Tooltip>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <SectionHeader title={t("settings.appearance.appIcon")} />
+      <SettingsAnchor anchorId="appearance-app-icon" className="rounded-lg border bg-card px-4 py-3 space-y-4">
+        <p className="text-xs text-muted-foreground">
+          {t("settings.appearance.appIcon.desc")}
+        </p>
+        <div className="space-y-3">
+          {APP_ICON_VARIANT_GROUPS.map((group) => (
+            <div key={group.id} className="space-y-1.5">
+              <span className="text-[11px] text-muted-foreground">{t(group.labelKey)}</span>
+              <div className="flex flex-wrap gap-2">
+                {group.variants.map((variant) => (
+                  <Tooltip key={variant}>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => setAppIconVariant(variant)}
+                        className={cn(
+                          "relative w-11 h-11 rounded-xl overflow-hidden transition-transform",
+                          resolvedAppIconVariant === variant
+                            ? "scale-105"
+                            : "hover:scale-105 opacity-90 hover:opacity-100",
+                        )}
+                        aria-label={t(APP_ICON_VARIANT_I18N_KEY[variant])}
+                      >
+                        <img
+                          src={APP_ICON_VARIANT_ASSET_PATH[variant]}
+                          alt=""
+                          className="w-full h-full object-cover"
+                          draggable={false}
+                        />
+                        {resolvedAppIconVariant === variant && (
+                          <span className="absolute inset-0 flex items-center justify-center bg-black/20">
+                            <Check className="text-white drop-shadow-md" size={14} />
+                          </span>
+                        )}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t(APP_ICON_VARIANT_I18N_KEY[variant])}</TooltipContent>
+                  </Tooltip>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </SettingsAnchor>
+
+      <SectionHeader title={t("settings.vault.title")} />
+      <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow
+          anchorId="appearance-vault-show-recent"
+          label={t('settings.vault.showRecentHosts')}
+          description={t('settings.vault.showRecentHostsDesc')}
+        >
+          <Toggle checked={showRecentHosts} onChange={setShowRecentHosts} />
+        </SettingRow>
+        <SettingRow
+          anchorId="appearance-vault-select-before-connect"
+          label={t('settings.vault.selectBeforeConnect')}
+          description={t('settings.vault.selectBeforeConnectDesc')}
+        >
+          <Toggle
+            checked={hostClickBehavior === 'select'}
+            onChange={(enabled) => setHostClickBehavior(enabled ? 'select' : 'connect')}
+          />
+        </SettingRow>
+        <SettingRow
+          anchorId="appearance-vault-ungrouped-root"
+          label={t('settings.vault.showOnlyUngroupedHostsInRoot')}
+          description={t('settings.vault.showOnlyUngroupedHostsInRootDesc')}
+        >
+          <Toggle
+            checked={showOnlyUngroupedHostsInRoot}
+            onChange={setShowOnlyUngroupedHostsInRoot}
+          />
+        </SettingRow>
+        <SettingRow
+          anchorId="appearance-vault-show-sftp-tab"
+          label={t('settings.vault.showSftpTab')}
+          description={t('settings.vault.showSftpTabDesc')}
+        >
+          <Toggle checked={showSftpTab} onChange={setShowSftpTab} />
+        </SettingRow>
+        <SettingRow
+          anchorId="appearance-vault-host-tree"
+          label={t('settings.vault.showHostTreeSidebar')}
+          description={t('settings.vault.showHostTreeSidebarDesc')}
+        >
+          <Toggle checked={showHostTreeSidebar} onChange={setShowHostTreeSidebar} />
+        </SettingRow>
+        <SettingRow
+          anchorId="appearance-vault-auto-import-known-hosts"
+          label={t('settings.vault.autoImportSystemKnownHosts')}
+          description={t('settings.vault.autoImportSystemKnownHostsDesc')}
+        >
+          <Toggle
+            checked={autoImportSystemKnownHosts}
+            onChange={setAutoImportSystemKnownHosts}
+          />
+        </SettingRow>
+        <SettingRow
+          anchorId="appearance-vault-notes-font"
+          label={t('settings.vault.notesFont')}
+          description={t('settings.vault.notesFontDesc')}
+        >
+          <TerminalFontSelect
+            value={resolveNoteFontSelectionId(noteFontOptions, noteFontFamily)}
+            fonts={noteFontOptions}
+            onChange={(v) => setNoteFontFamily(resolveNoteFontSelectionFamily(noteFontOptions, v))}
+            className="w-48"
+            ariaLabel={t('settings.vault.notesFont')}
+          />
+        </SettingRow>
+        <SettingRow
+          anchorId="appearance-vault-notes-font-size"
+          label={t('settings.vault.notesFontSize')}
+          description={t('settings.vault.notesFontSizeDesc')}
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={12}
+              max={22}
+              step={1}
+              value={noteFontSize}
+              onChange={(e) => handleSetNoteFontSize(Number(e.target.value))}
+              className="w-28 accent-primary"
+            />
+            <span className="text-sm text-muted-foreground w-10 text-right tabular-nums">
+              {noteFontSize}px
+            </span>
+          </div>
+        </SettingRow>
+        <SettingRow
+          anchorId="appearance-vault-notes-code-font-size"
+          label={t('settings.vault.notesCodeFontSize')}
+          description={t('settings.vault.notesCodeFontSizeDesc')}
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={10}
+              max={22}
+              step={1}
+              value={noteCodeFontSize}
+              onChange={(e) => handleSetNoteCodeFontSize(Number(e.target.value))}
+              className="w-28 accent-primary"
+            />
+            <span className="text-sm text-muted-foreground w-10 text-right tabular-nums">
+              {noteCodeFontSize}px
+            </span>
+          </div>
+        </SettingRow>
+      </div>
+
+      <SettingsAnchor anchorId="appearance-custom-css">
+        <div className="mb-3 flex items-center gap-1.5">
+          <h3 className="text-sm font-semibold text-foreground">
+            {t("settings.appearance.customCss")}
+          </h3>
+          <button
+            type="button"
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+            aria-label={t("settings.appearance.customCss.help.ariaLabel")}
+            onClick={() => setCustomCssHelpOpen(true)}
+          >
+            <HelpCircle size={13} />
+          </button>
+        </div>
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            {t("settings.appearance.customCss.desc")}
+          </p>
+          <DebouncedTextarea
+            value={customCSS}
+            onCommit={setCustomCSS}
+            onDraftChange={applyCustomCssToDocument}
+            placeholder={t("settings.appearance.customCss.placeholder")}
+            className="w-full h-32 px-3 py-2 text-xs font-mono bg-muted/50 border border-border rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-primary/50"
+            spellCheck={false}
+          />
+        </div>
+      </SettingsAnchor>
+
+      <Dialog open={customCssHelpOpen} onOpenChange={setCustomCssHelpOpen}>
+        <DialogContent className="flex max-h-[80vh] flex-col overflow-hidden sm:max-w-[600px]">
+          <DialogHeader>
+            <DialogTitle>{t("settings.appearance.customCss.help.title")}</DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            {customCssHelpOpen ? (
+              <NoteProse className={CUSTOM_CSS_HELP_PROSE_CLASS}>
+                {t("settings.appearance.customCss.help.body")}
+              </NoteProse>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </SettingsTabContent>
+  );
+}
+
+export default memo(SettingsAppearanceTab);

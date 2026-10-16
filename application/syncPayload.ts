@@ -1,0 +1,966 @@
+/**
+ * Sync Payload Builders - Single source of truth for constructing and applying
+ * the encrypted cloud-sync payload.
+ *
+ * Both the main window (App.tsx) and the settings window (SettingsSyncTab.tsx)
+ * must use these helpers to guarantee every field is included and no data is
+ * silently dropped.
+ */
+
+import type {
+  GroupConfig,
+  Host,
+  Identity,
+  KnownHost,
+  PortForwardingRule,
+  ProxyProfile,
+  SftpBookmark,
+  Snippet,
+  SSHKey,
+  VaultNote,
+} from '../domain/models';
+import {
+  CLOUD_SYNC_PAYLOAD_ENTITY_KEYS,
+  SYNC_PAYLOAD_ENTITY_KEYS,
+  SYNC_STORAGE_KEYS,
+  hasSyncPayloadEntityData,
+  retainLocalHostLastConnectedAt,
+  sanitizeHostsForSync,
+  type SyncPayload,
+} from '../domain/sync';
+import { migrateHostsFromLegacyLineTimestamps } from '../domain/host';
+import { toPersistedPortForwardingRules } from '../domain/portForwardingPersistence';
+import {
+  nextCustomKeyBindingsSyncVersion,
+  parseCustomKeyBindingsStorageRecord,
+  serializeCustomKeyBindingsStorageRecord,
+} from '../domain/customKeyBindings';
+import {
+  stripSyncPayloadEncryptedCredentials,
+} from '../domain/credentials';
+import { localStorageAdapter } from '../infrastructure/persistence/localStorageAdapter';
+import { rehydrateGlobalSftpBookmarks } from './state/sftp/globalSftpBookmarks';
+import {
+  clampTerminalFontSizeValue,
+  nextTerminalFontSizeSyncVersion,
+  parseTerminalFontSizeRecord,
+  serializeTerminalFontSizeRecord,
+} from './state/terminalFontSizeSync';
+import {
+  parseCustomAccentRecord,
+  serializeCustomAccentRecord,
+} from './state/customAccentSync';
+import { isValidHslToken } from './state/settingsStateDefaults';
+import {
+  STORAGE_KEY_THEME,
+  STORAGE_KEY_UI_THEME_LIGHT,
+  STORAGE_KEY_UI_THEME_DARK,
+  STORAGE_KEY_ACCENT_MODE,
+  STORAGE_KEY_COLOR,
+  STORAGE_KEY_UI_FONT_FAMILY,
+  STORAGE_KEY_UI_LANGUAGE,
+  STORAGE_KEY_CUSTOM_CSS,
+  STORAGE_KEY_TERM_THEME,
+  STORAGE_KEY_TERM_FOLLOW_APP_THEME,
+  STORAGE_KEY_TERM_THEME_DARK,
+  STORAGE_KEY_TERM_THEME_LIGHT,
+  STORAGE_KEY_TERM_FONT_FAMILY,
+  STORAGE_KEY_TERM_FONT_SIZE,
+  STORAGE_KEY_TERM_SETTINGS,
+  STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN,
+  STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN_TAB,
+  STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN,
+  STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB,
+  STORAGE_KEY_CUSTOM_KEY_BINDINGS,
+  STORAGE_KEY_EDITOR_WORD_WRAP,
+  STORAGE_KEY_SFTP_DOUBLE_CLICK_BEHAVIOR,
+  STORAGE_KEY_SFTP_AUTO_SYNC,
+  STORAGE_KEY_SFTP_SHOW_HIDDEN_FILES,
+  STORAGE_KEY_SFTP_USE_COMPRESSED_UPLOAD,
+  STORAGE_KEY_SFTP_SKIP_UNCHANGED,
+  STORAGE_KEY_SFTP_AUTO_OPEN_SIDEBAR,
+  STORAGE_KEY_SFTP_FOLLOW_TERMINAL_CWD,
+  STORAGE_KEY_SFTP_DEFAULT_VIEW_MODE,
+  STORAGE_KEY_SFTP_GLOBAL_BOOKMARKS,
+  STORAGE_KEY_CUSTOM_THEMES,
+  STORAGE_KEY_SHOW_RECENT_HOSTS,
+  STORAGE_KEY_HOST_CLICK_BEHAVIOR,
+  STORAGE_KEY_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT,
+  STORAGE_KEY_SHOW_SFTP_TAB,
+  STORAGE_KEY_SHOW_HOST_TREE_SIDEBAR,
+  STORAGE_KEY_SHELL_ONLY_TAB_NUMBER_SHORTCUTS,
+  STORAGE_KEY_SHOW_TAB_NUMBER_BADGES,
+  STORAGE_KEY_DISABLE_TERMINAL_FONT_ZOOM,
+  STORAGE_KEY_WORKSPACE_FOCUS_STYLE,
+  STORAGE_KEY_PORT_FORWARDING,
+  STORAGE_KEY_VAULT_NOTES_FONT_FAMILY,
+  STORAGE_KEY_VAULT_NOTES_FONT_SIZE,
+  STORAGE_KEY_VAULT_NOTES_CODE_FONT_SIZE,
+} from '../infrastructure/config/storageKeys';
+import { isTerminalSidePanelAutoOpenTab } from '../domain/terminalSidePanelAutoOpen';
+import { prepareRestoredPayloadConvergentWrites } from './convergentSyncReplica';
+
+// ---------------------------------------------------------------------------
+// Input types
+// ---------------------------------------------------------------------------
+
+const CUSTOM_KEY_BINDINGS_SYNC_PAYLOAD_ORIGIN = 'sync-payload';
+
+/** Vault-owned data. Some fields are local-only and excluded from cloud sync. */
+export interface SyncableVaultData {
+  hosts: Host[];
+  keys: SSHKey[];
+  identities: Identity[];
+  proxyProfiles?: ProxyProfile[];
+  snippets: Snippet[];
+  customGroups: string[];
+  snippetPackages?: string[];
+  notes?: VaultNote[];
+  noteGroups?: string[];
+  /** Local trust records. Kept in local backups, excluded from cloud sync. */
+  knownHosts: KnownHost[];
+  groupConfigs?: GroupConfig[];
+}
+
+/**
+ * Returns true when the payload carries non-empty plugin sidecar entries.
+ *
+ * An explicit empty `{entries:[]}` bundle is intentionally NOT treated as
+ * meaningful by itself — last-known cache alone must not authorize pushing a
+ * wiped hosts/keys vault to cloud (empty-vault upload guard). Sidecar-only
+ * wipes still sync when the vault also has entities/settings, or via Force Push.
+ */
+function hasMeaningfulPluginSidecars(payload: SyncPayload): boolean {
+  return Array.isArray(payload.pluginSidecars?.entries)
+    && payload.pluginSidecars.entries.length > 0;
+}
+
+/**
+ * Returns true when a payload contains entities, settings, or meaningful
+ * plugin sidecars worth syncing / protecting with empty-vault guards.
+ * Local-only trust records are intentionally ignored by the cloud variant.
+ */
+export function hasMeaningfulSyncData(payload: SyncPayload): boolean {
+  if (hasSyncPayloadEntityData(payload, SYNC_PAYLOAD_ENTITY_KEYS)) return true;
+
+  if (
+    payload.settings && Object.values(payload.settings).some((value) => value !== undefined)
+  ) {
+    return true;
+  }
+
+  return hasMeaningfulPluginSidecars(payload);
+}
+
+/**
+ * Returns true when a payload contains cloud-sync data.
+ * Local-only trust records are intentionally ignored.
+ */
+export function hasMeaningfulCloudSyncData(payload: SyncPayload): boolean {
+  if (hasSyncPayloadEntityData(payload, CLOUD_SYNC_PAYLOAD_ENTITY_KEYS)) return true;
+
+  if (
+    payload.settings && Object.values(payload.settings).some((value) => value !== undefined)
+  ) {
+    return true;
+  }
+
+  // Plugin-only profiles (settings/baselines, no vault entities) must still sync.
+  return hasMeaningfulPluginSidecars(payload);
+}
+
+/**
+ * Returns true only when the payload contains synced vault entities.
+ * Settings are intentionally ignored so default settings written on first
+ * launch do not make a new device look non-empty during cloud restore checks.
+ */
+export function hasCloudSyncEntityData(payload: SyncPayload): boolean {
+  return hasSyncPayloadEntityData(payload, CLOUD_SYNC_PAYLOAD_ENTITY_KEYS);
+}
+
+export function shouldPromptCloudVaultRecovery(
+  localPayload: SyncPayload,
+  remotePayload: SyncPayload,
+): boolean {
+  return !hasCloudSyncEntityData(localPayload) && hasCloudSyncEntityData(remotePayload);
+}
+
+export function sanitizePortForwardingRulesForSync(
+  rules: PortForwardingRule[] | undefined,
+): PortForwardingRule[] | undefined {
+  if (!rules) return rules;
+  // Runtime phases are never part of vault/cloud sync. lastUsedAt is also
+  // stripped so runtime activity cannot churn sync hashes.
+  return toPersistedPortForwardingRules(rules).map((rule) => ({
+    ...rule,
+    lastUsedAt: undefined,
+  }));
+}
+
+export { retainLocalHostLastConnectedAt, sanitizeHostsForSync };
+
+export function getEffectivePortForwardingRulesForSync(
+  rules: PortForwardingRule[] | undefined,
+): PortForwardingRule[] | undefined {
+  let effectiveRules = rules;
+  if (!effectiveRules || effectiveRules.length === 0) {
+    const stored = localStorageAdapter.read<PortForwardingRule[]>(STORAGE_KEY_PORT_FORWARDING);
+    if (Array.isArray(stored) && stored.length > 0) {
+      effectiveRules = stored;
+    }
+  }
+
+  return sanitizePortForwardingRulesForSync(effectiveRules);
+}
+
+/** Callbacks used by `applySyncPayload` to import data into local state. */
+interface SyncPayloadImporters {
+  /** Import vault data. Cloud sync excludes local-only known hosts by default. */
+  importVaultData: (jsonString: string) => void | Promise<void>;
+  /** Import port-forwarding rules (lives outside the vault hook). */
+  importPortForwardingRules?: (rules: PortForwardingRule[]) => void;
+  /** Called after synced settings have been written to localStorage. */
+  onSettingsApplied?: () => void;
+}
+
+// ---------------------------------------------------------------------------
+// Settings sync helpers
+// ---------------------------------------------------------------------------
+
+/** Terminal settings keys that are safe to sync (platform-agnostic). */
+const SYNCABLE_TERMINAL_KEYS = [
+  'startupCommandDelayMs',
+  'scrollback', 'drawBoldInBrightColors', 'terminalEmulationType',
+  'fontLigatures', 'fontSmoothing', 'fontWeight', 'fontWeightBold', 'fallbackFont',
+  'linePadding', 'cursorShape', 'cursorBlink', 'cursorBarWidth', 'highlightCursorLine', 'minimumContrastRatio',
+  'altAsMeta', 'optionArrowWordJump', 'shiftEnterNewlineEnabled', 'shiftEnterNewlineText',
+  'shiftEnterForceText',
+  'kittyKeyboardProtocolEnabled',
+  'scrollOnInput', 'scrollOnOutput', 'scrollOnKeyPress', 'scrollOnPaste',
+  'smoothScrolling',
+  'rightClickBehavior', 'rightClickLongPressMenu', 'showContextMenuOverFullscreenApps', 'middleClickBehavior', 'copyOnSelect', 'normalizeTextOnCopy', 'middleClickPaste', 'wordSeparators',
+  'linkModifier', 'keywordHighlightEnabled', 'keywordHighlightRules',
+  'keepaliveInterval', 'keepaliveCountMax', 'disableBracketedPaste', 'clearWipesScrollback',
+  'autoUploadClipboardImageOnPaste',
+  'confirmBeforeMultilinePaste', 'multilinePasteConfirmMinLines',
+  'preserveSelectionOnInput', 'forcePromptNewLine', 'osc52Clipboard', 'oscNotifications', 'dynamicTabTitleMode', 'tabDoubleClickBehavior',
+  'autoCloseOnExit', 'disconnectedNoticeMode',
+  'showHostInfoBar', 'hostInfoBarTitleMode', 'showServerStats',
+  'serverStatsRefreshInterval',
+  'systemManagerProcessRefreshInterval', 'systemManagerTmuxRefreshInterval',
+  'systemManagerDockerListRefreshInterval', 'systemManagerDockerStatsRefreshInterval',
+  'rendererType',
+  // Inline image protocol switches are a preference and sync; the per-terminal
+  // memory limits stay local because they are tuned per device (like hibernate*).
+  'inlineImagesEnabled', 'inlineImageKittyEnabled', 'inlineImageSixelEnabled', 'inlineImageIipEnabled',
+  'autocompleteEnabled', 'autocompleteGhostText', 'autocompletePopupMenu',
+  'autocompleteDebounceMs', 'autocompleteMinChars', 'autocompleteMaxSuggestions',
+  'autocompleteHistoryScope',
+] as const;
+
+export const SYNCABLE_SETTING_STORAGE_KEYS = [
+  STORAGE_KEY_THEME,
+  STORAGE_KEY_UI_THEME_LIGHT,
+  STORAGE_KEY_UI_THEME_DARK,
+  STORAGE_KEY_ACCENT_MODE,
+  STORAGE_KEY_COLOR,
+  STORAGE_KEY_UI_FONT_FAMILY,
+  STORAGE_KEY_UI_LANGUAGE,
+  STORAGE_KEY_CUSTOM_CSS,
+  STORAGE_KEY_VAULT_NOTES_FONT_FAMILY,
+  STORAGE_KEY_VAULT_NOTES_FONT_SIZE,
+  STORAGE_KEY_VAULT_NOTES_CODE_FONT_SIZE,
+  STORAGE_KEY_TERM_THEME,
+  STORAGE_KEY_TERM_FOLLOW_APP_THEME,
+  STORAGE_KEY_TERM_THEME_DARK,
+  STORAGE_KEY_TERM_THEME_LIGHT,
+  STORAGE_KEY_TERM_FONT_FAMILY,
+  STORAGE_KEY_TERM_FONT_SIZE,
+  STORAGE_KEY_TERM_SETTINGS,
+  STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN,
+  STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN_TAB,
+  STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN,
+  STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB,
+  STORAGE_KEY_CUSTOM_THEMES,
+  STORAGE_KEY_CUSTOM_KEY_BINDINGS,
+  STORAGE_KEY_EDITOR_WORD_WRAP,
+  STORAGE_KEY_SFTP_DOUBLE_CLICK_BEHAVIOR,
+  STORAGE_KEY_SFTP_AUTO_SYNC,
+  STORAGE_KEY_SFTP_SHOW_HIDDEN_FILES,
+  STORAGE_KEY_SFTP_USE_COMPRESSED_UPLOAD,
+  STORAGE_KEY_SFTP_SKIP_UNCHANGED,
+  STORAGE_KEY_SFTP_AUTO_OPEN_SIDEBAR,
+  STORAGE_KEY_SFTP_FOLLOW_TERMINAL_CWD,
+  STORAGE_KEY_SFTP_DEFAULT_VIEW_MODE,
+  STORAGE_KEY_SFTP_GLOBAL_BOOKMARKS,
+  STORAGE_KEY_SHOW_RECENT_HOSTS,
+  STORAGE_KEY_HOST_CLICK_BEHAVIOR,
+  STORAGE_KEY_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT,
+  STORAGE_KEY_SHOW_SFTP_TAB,
+  STORAGE_KEY_SHELL_ONLY_TAB_NUMBER_SHORTCUTS,
+  STORAGE_KEY_SHOW_TAB_NUMBER_BADGES,
+  STORAGE_KEY_WORKSPACE_FOCUS_STYLE,
+] as const;
+
+/**
+ * Collect all syncable settings from localStorage.
+ */
+export function collectSyncableSettings(): SyncPayload['settings'] {
+  const settings: SyncPayload['settings'] = {};
+
+  // Theme & Appearance
+  const theme = localStorageAdapter.readString(STORAGE_KEY_THEME);
+  if (theme === 'light' || theme === 'dark' || theme === 'system') settings.theme = theme;
+  const lightUi = localStorageAdapter.readString(STORAGE_KEY_UI_THEME_LIGHT);
+  if (lightUi) settings.lightUiThemeId = lightUi;
+  const darkUi = localStorageAdapter.readString(STORAGE_KEY_UI_THEME_DARK);
+  if (darkUi) settings.darkUiThemeId = darkUi;
+  const accentMode = localStorageAdapter.readString(STORAGE_KEY_ACCENT_MODE);
+  if (accentMode === 'theme' || accentMode === 'custom') settings.accentMode = accentMode;
+  const accentRaw = localStorageAdapter.readString(STORAGE_KEY_COLOR);
+  if (accentRaw) settings.customAccent = parseCustomAccentRecord(accentRaw).color;
+  const uiFont = localStorageAdapter.readString(STORAGE_KEY_UI_FONT_FAMILY);
+  if (uiFont) settings.uiFontFamilyId = uiFont;
+  const lang = localStorageAdapter.readString(STORAGE_KEY_UI_LANGUAGE);
+  if (lang) settings.uiLanguage = lang;
+  const css = localStorageAdapter.readString(STORAGE_KEY_CUSTOM_CSS);
+  if (css != null) settings.customCSS = css;
+  const noteFontFamily = localStorageAdapter.readString(STORAGE_KEY_VAULT_NOTES_FONT_FAMILY);
+  if (noteFontFamily != null) settings.noteFontFamily = noteFontFamily;
+  const noteFontSize = localStorageAdapter.readNumber(STORAGE_KEY_VAULT_NOTES_FONT_SIZE);
+  if (noteFontSize != null && noteFontSize >= 10 && noteFontSize <= 32) settings.noteFontSize = noteFontSize;
+  const noteCodeFontSize = localStorageAdapter.readNumber(STORAGE_KEY_VAULT_NOTES_CODE_FONT_SIZE);
+  if (noteCodeFontSize != null && noteCodeFontSize >= 10 && noteCodeFontSize <= 32) settings.noteCodeFontSize = noteCodeFontSize;
+
+  // Terminal
+  const termTheme = localStorageAdapter.readString(STORAGE_KEY_TERM_THEME);
+  if (termTheme) settings.terminalTheme = termTheme;
+  const followAppTermTheme = localStorageAdapter.readString(STORAGE_KEY_TERM_FOLLOW_APP_THEME);
+  if (followAppTermTheme === 'true' || followAppTermTheme === 'false') {
+    settings.followAppTerminalTheme = followAppTermTheme === 'true';
+  }
+  const termThemeDark = localStorageAdapter.readString(STORAGE_KEY_TERM_THEME_DARK);
+  if (termThemeDark) settings.terminalThemeDark = termThemeDark;
+  const termThemeLight = localStorageAdapter.readString(STORAGE_KEY_TERM_THEME_LIGHT);
+  if (termThemeLight) settings.terminalThemeLight = termThemeLight;
+  const termFont = localStorageAdapter.readString(STORAGE_KEY_TERM_FONT_FAMILY);
+  if (termFont) settings.terminalFontFamily = termFont;
+  const termSizeRaw = localStorageAdapter.readString(STORAGE_KEY_TERM_FONT_SIZE);
+  if (termSizeRaw != null && termSizeRaw !== '') {
+    settings.terminalFontSize = parseTerminalFontSizeRecord(termSizeRaw).fontSize;
+  }
+  const terminalSidePanelAutoOpen = localStorageAdapter.readBoolean(STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN);
+  if (terminalSidePanelAutoOpen != null) settings.terminalSidePanelAutoOpen = terminalSidePanelAutoOpen;
+  const terminalSidePanelAutoOpenTab = localStorageAdapter.readString(STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN_TAB);
+  if (isTerminalSidePanelAutoOpenTab(terminalSidePanelAutoOpenTab)) {
+    settings.terminalSidePanelAutoOpenTab = terminalSidePanelAutoOpenTab;
+  }
+  const localShellSidePanelAutoOpen = localStorageAdapter.readBoolean(STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN);
+  if (localShellSidePanelAutoOpen != null) settings.localShellSidePanelAutoOpen = localShellSidePanelAutoOpen;
+  const localShellSidePanelAutoOpenTab = localStorageAdapter.readString(STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB);
+  if (isTerminalSidePanelAutoOpenTab(localShellSidePanelAutoOpenTab)) {
+    settings.localShellSidePanelAutoOpenTab = localShellSidePanelAutoOpenTab;
+  }
+
+  // Terminal settings (syncable subset only)
+  const termSettingsRaw = localStorageAdapter.readString(STORAGE_KEY_TERM_SETTINGS);
+  if (termSettingsRaw) {
+    try {
+      const full = JSON.parse(termSettingsRaw);
+      const subset: Record<string, unknown> = {};
+      for (const key of SYNCABLE_TERMINAL_KEYS) {
+        if (key in full) subset[key] = full[key];
+      }
+      if (Object.keys(subset).length > 0) settings.terminalSettings = subset;
+    } catch { /* ignore corrupt data */ }
+  }
+
+  // Custom terminal themes
+  const customThemesRaw = localStorageAdapter.readString(STORAGE_KEY_CUSTOM_THEMES);
+  if (customThemesRaw) {
+    try {
+      const parsed = JSON.parse(customThemesRaw);
+      if (Array.isArray(parsed)) settings.customTerminalThemes = parsed;
+    } catch { /* ignore */ }
+  }
+
+  // Keyboard
+  const kb = localStorageAdapter.readString(STORAGE_KEY_CUSTOM_KEY_BINDINGS);
+  if (kb) {
+    const parsed = parseCustomKeyBindingsStorageRecord(kb);
+    if (parsed) settings.customKeyBindings = parsed.bindings;
+  }
+
+  // Editor
+  const wordWrap = localStorageAdapter.readString(STORAGE_KEY_EDITOR_WORD_WRAP);
+  if (wordWrap === 'true' || wordWrap === 'false') settings.editorWordWrap = wordWrap === 'true';
+
+  // SFTP
+  const dblClick = localStorageAdapter.readString(STORAGE_KEY_SFTP_DOUBLE_CLICK_BEHAVIOR);
+  if (dblClick === 'open' || dblClick === 'transfer') settings.sftpDoubleClickBehavior = dblClick;
+  const autoSync = localStorageAdapter.readString(STORAGE_KEY_SFTP_AUTO_SYNC);
+  if (autoSync === 'true' || autoSync === 'false') settings.sftpAutoSync = autoSync === 'true';
+  const hidden = localStorageAdapter.readString(STORAGE_KEY_SFTP_SHOW_HIDDEN_FILES);
+  if (hidden === 'true' || hidden === 'false') settings.sftpShowHiddenFiles = hidden === 'true';
+  const compress = localStorageAdapter.readString(STORAGE_KEY_SFTP_USE_COMPRESSED_UPLOAD);
+  if (compress === 'true' || compress === 'false') settings.sftpUseCompressedUpload = compress === 'true';
+  const skipUnchanged = localStorageAdapter.readBoolean(STORAGE_KEY_SFTP_SKIP_UNCHANGED);
+  if (skipUnchanged != null) settings.sftpSkipUnchanged = skipUnchanged;
+  const autoOpenSidebar = localStorageAdapter.readString(STORAGE_KEY_SFTP_AUTO_OPEN_SIDEBAR);
+  if (autoOpenSidebar === 'true' || autoOpenSidebar === 'false') settings.sftpAutoOpenSidebar = autoOpenSidebar === 'true';
+  const followTerminalCwd = localStorageAdapter.readString(STORAGE_KEY_SFTP_FOLLOW_TERMINAL_CWD);
+  if (followTerminalCwd === 'true' || followTerminalCwd === 'false') settings.sftpFollowTerminalCwd = followTerminalCwd === 'true';
+  const defaultViewMode = localStorageAdapter.readString(STORAGE_KEY_SFTP_DEFAULT_VIEW_MODE);
+  if (defaultViewMode === 'list' || defaultViewMode === 'tree') settings.sftpDefaultViewMode = defaultViewMode;
+
+  // SFTP Bookmarks (global only - local bookmarks are device-specific)
+  const globalBookmarks = localStorageAdapter.read<SftpBookmark[]>(STORAGE_KEY_SFTP_GLOBAL_BOOKMARKS);
+  if (globalBookmarks && Array.isArray(globalBookmarks)) settings.sftpGlobalBookmarks = globalBookmarks;
+
+
+  const showRecent = localStorageAdapter.readBoolean(STORAGE_KEY_SHOW_RECENT_HOSTS);
+  if (showRecent != null) settings.showRecentHosts = showRecent;
+  const hostClickBehavior = localStorageAdapter.readString(STORAGE_KEY_HOST_CLICK_BEHAVIOR);
+  if (hostClickBehavior === 'connect' || hostClickBehavior === 'select') {
+    settings.hostClickBehavior = hostClickBehavior;
+  }
+  const showOnlyUngroupedHostsInRoot = localStorageAdapter.readBoolean(STORAGE_KEY_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT);
+  if (showOnlyUngroupedHostsInRoot != null) settings.showOnlyUngroupedHostsInRoot = showOnlyUngroupedHostsInRoot;
+  const showSftpTab = localStorageAdapter.readBoolean(STORAGE_KEY_SHOW_SFTP_TAB);
+  if (showSftpTab != null) settings.showSftpTab = showSftpTab;
+  const shellOnlyTabNumberShortcuts = localStorageAdapter.readBoolean(STORAGE_KEY_SHELL_ONLY_TAB_NUMBER_SHORTCUTS);
+  if (shellOnlyTabNumberShortcuts != null) settings.shellOnlyTabNumberShortcuts = shellOnlyTabNumberShortcuts;
+  const showTabNumberBadges = localStorageAdapter.readBoolean(STORAGE_KEY_SHOW_TAB_NUMBER_BADGES);
+  if (showTabNumberBadges != null) settings.showTabNumberBadges = showTabNumberBadges;
+  const disableTerminalFontZoom = localStorageAdapter.readBoolean(STORAGE_KEY_DISABLE_TERMINAL_FONT_ZOOM);
+  if (disableTerminalFontZoom != null) settings.disableTerminalFontZoom = disableTerminalFontZoom;
+  const showHostTreeSidebar = localStorageAdapter.readBoolean(STORAGE_KEY_SHOW_HOST_TREE_SIDEBAR);
+  if (showHostTreeSidebar != null) settings.showHostTreeSidebar = showHostTreeSidebar;
+  const workspaceFocusStyle = localStorageAdapter.readString(STORAGE_KEY_WORKSPACE_FOCUS_STYLE);
+  if (workspaceFocusStyle === 'dim' || workspaceFocusStyle === 'border') {
+    settings.workspaceFocusStyle = workspaceFocusStyle;
+  }
+
+  return Object.keys(settings).length > 0 ? settings : undefined;
+}
+
+export async function collectCloudSyncableSettings(): Promise<SyncPayload['settings']> {
+  return collectSyncableSettings();
+}
+
+function collectLocalBackupSettings(): SyncPayload['settings'] {
+  return collectSyncableSettings();
+}
+
+/**
+ * Apply synced settings to localStorage. Merges terminal settings
+ * to preserve platform-specific fields.
+ */
+async function applySyncableSettings(
+  settings: NonNullable<SyncPayload['settings']>,
+): Promise<void> {
+  // Theme & Appearance
+  if (settings.theme != null) localStorageAdapter.writeString(STORAGE_KEY_THEME, settings.theme);
+  if (settings.lightUiThemeId != null) localStorageAdapter.writeString(STORAGE_KEY_UI_THEME_LIGHT, settings.lightUiThemeId);
+  if (settings.darkUiThemeId != null) localStorageAdapter.writeString(STORAGE_KEY_UI_THEME_DARK, settings.darkUiThemeId);
+  if (settings.accentMode != null) localStorageAdapter.writeString(STORAGE_KEY_ACCENT_MODE, settings.accentMode);
+  if (settings.customAccent != null) {
+    const storedColor = localStorageAdapter.readString(STORAGE_KEY_COLOR);
+    const existing = parseCustomAccentRecord(storedColor);
+    const incomingColor = parseCustomAccentRecord(settings.customAccent).color;
+    // A missing or malformed record parses to the fallback color, but still
+    // needs to be replaced by an explicit incoming value.
+    const storedColorIsValid = storedColor !== null && (
+      isValidHslToken(storedColor.trim())
+      || storedColor === serializeCustomAccentRecord(existing)
+    );
+    if (!storedColorIsValid || incomingColor !== existing.color) {
+      localStorageAdapter.writeString(
+        STORAGE_KEY_COLOR,
+        serializeCustomAccentRecord({
+          color: incomingColor,
+          // Bump so peer windows' version gates accept the synced value.
+          version: Math.max(existing.version, 0) + 1,
+        }),
+      );
+    }
+  }
+  if (settings.uiFontFamilyId != null) localStorageAdapter.writeString(STORAGE_KEY_UI_FONT_FAMILY, settings.uiFontFamilyId);
+  if (settings.uiLanguage != null) localStorageAdapter.writeString(STORAGE_KEY_UI_LANGUAGE, settings.uiLanguage);
+  if (settings.customCSS != null) localStorageAdapter.writeString(STORAGE_KEY_CUSTOM_CSS, settings.customCSS);
+  if (settings.noteFontFamily != null) localStorageAdapter.writeString(STORAGE_KEY_VAULT_NOTES_FONT_FAMILY, settings.noteFontFamily);
+  if (settings.noteFontSize != null && settings.noteFontSize >= 10 && settings.noteFontSize <= 32) {
+    localStorageAdapter.writeNumber(STORAGE_KEY_VAULT_NOTES_FONT_SIZE, settings.noteFontSize);
+  }
+  if (settings.noteCodeFontSize != null && settings.noteCodeFontSize >= 10 && settings.noteCodeFontSize <= 32) {
+    localStorageAdapter.writeNumber(STORAGE_KEY_VAULT_NOTES_CODE_FONT_SIZE, settings.noteCodeFontSize);
+  }
+
+  // Terminal
+  if (settings.terminalTheme != null) localStorageAdapter.writeString(STORAGE_KEY_TERM_THEME, settings.terminalTheme);
+  if (settings.followAppTerminalTheme != null) {
+    localStorageAdapter.writeString(STORAGE_KEY_TERM_FOLLOW_APP_THEME, String(settings.followAppTerminalTheme));
+  }
+  if (settings.terminalThemeDark != null) localStorageAdapter.writeString(STORAGE_KEY_TERM_THEME_DARK, settings.terminalThemeDark);
+  if (settings.terminalThemeLight != null) localStorageAdapter.writeString(STORAGE_KEY_TERM_THEME_LIGHT, settings.terminalThemeLight);
+  if (settings.terminalFontFamily != null) localStorageAdapter.writeString(STORAGE_KEY_TERM_FONT_FAMILY, settings.terminalFontFamily);
+  if (settings.terminalFontSize != null) {
+    const storedFontSize = localStorageAdapter.readString(STORAGE_KEY_TERM_FONT_SIZE);
+    const existing = parseTerminalFontSizeRecord(storedFontSize);
+    const incomingFontSize = clampTerminalFontSizeValue(settings.terminalFontSize);
+    // A missing or malformed record parses to the default font size. A
+    // supported legacy number remains valid without forcing migration.
+    const storedFontSizeIsValid = storedFontSize !== null && (
+      storedFontSize.trim() === String(existing.fontSize)
+      || storedFontSize === serializeTerminalFontSizeRecord(existing)
+    );
+    if (!storedFontSizeIsValid || incomingFontSize !== existing.fontSize) {
+      localStorageAdapter.writeString(
+        STORAGE_KEY_TERM_FONT_SIZE,
+        serializeTerminalFontSizeRecord({
+          fontSize: incomingFontSize,
+          // Bump so peer windows' version gates accept the synced value.
+          version: nextTerminalFontSizeSyncVersion(existing.version, existing.version),
+          origin: 'sync-payload',
+        }),
+      );
+    }
+  }
+  if (settings.terminalSidePanelAutoOpen != null) {
+    localStorageAdapter.writeBoolean(STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN, settings.terminalSidePanelAutoOpen);
+  }
+  if (isTerminalSidePanelAutoOpenTab(settings.terminalSidePanelAutoOpenTab)) {
+    localStorageAdapter.writeString(STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN_TAB, settings.terminalSidePanelAutoOpenTab);
+  }
+  if (settings.localShellSidePanelAutoOpen != null) {
+    localStorageAdapter.writeBoolean(STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN, settings.localShellSidePanelAutoOpen);
+  }
+  if (isTerminalSidePanelAutoOpenTab(settings.localShellSidePanelAutoOpenTab)) {
+    localStorageAdapter.writeString(STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB, settings.localShellSidePanelAutoOpenTab);
+  }
+
+  // Terminal settings - merge with existing to preserve platform-specific keys
+  if (settings.terminalSettings) {
+    let existing: Record<string, unknown> = {};
+    const raw = localStorageAdapter.readString(STORAGE_KEY_TERM_SETTINGS);
+    if (raw) {
+      try { existing = JSON.parse(raw); } catch { /* ignore */ }
+    }
+    const merged = { ...existing };
+    const hasIncomingMiddleClickBehavior = 'middleClickBehavior' in settings.terminalSettings;
+    const hasIncomingMiddleClickPaste = 'middleClickPaste' in settings.terminalSettings;
+    for (const key of SYNCABLE_TERMINAL_KEYS) {
+      if (key in settings.terminalSettings) {
+        merged[key] = settings.terminalSettings[key];
+      }
+    }
+    if (hasIncomingMiddleClickBehavior) {
+      const behavior = settings.terminalSettings.middleClickBehavior;
+      if (
+        behavior === 'context-menu' ||
+        behavior === 'paste' ||
+        behavior === 'disabled'
+      ) {
+        merged.middleClickPaste = behavior === 'paste';
+      }
+    } else if (hasIncomingMiddleClickPaste) {
+      merged.middleClickBehavior = settings.terminalSettings.middleClickPaste === false
+        ? 'disabled'
+        : 'paste';
+    }
+    localStorageAdapter.writeString(STORAGE_KEY_TERM_SETTINGS, JSON.stringify(merged));
+  }
+
+  // Custom terminal themes
+  if (settings.customTerminalThemes != null) {
+    localStorageAdapter.writeString(STORAGE_KEY_CUSTOM_THEMES, JSON.stringify(settings.customTerminalThemes));
+  }
+
+  // Keyboard
+  if (settings.customKeyBindings != null) {
+    const storedBindings = localStorageAdapter.readString(STORAGE_KEY_CUSTOM_KEY_BINDINGS);
+    const previous = parseCustomKeyBindingsStorageRecord(storedBindings);
+    // Keep an explicit empty binding set when this device has no record.
+    const incomingBindings = JSON.stringify(settings.customKeyBindings);
+    const existingBindings = JSON.stringify(previous?.bindings ?? []);
+    if (previous === null || incomingBindings !== existingBindings) {
+      localStorageAdapter.writeString(
+        STORAGE_KEY_CUSTOM_KEY_BINDINGS,
+        serializeCustomKeyBindingsStorageRecord({
+          version: nextCustomKeyBindingsSyncVersion(previous?.version || 0),
+          origin: CUSTOM_KEY_BINDINGS_SYNC_PAYLOAD_ORIGIN,
+          bindings: settings.customKeyBindings,
+        }),
+      );
+    }
+  }
+
+  // Editor
+  if (settings.editorWordWrap != null) localStorageAdapter.writeString(STORAGE_KEY_EDITOR_WORD_WRAP, String(settings.editorWordWrap));
+
+  // SFTP
+  if (settings.sftpDoubleClickBehavior != null) localStorageAdapter.writeString(STORAGE_KEY_SFTP_DOUBLE_CLICK_BEHAVIOR, settings.sftpDoubleClickBehavior);
+  if (settings.sftpAutoSync != null) localStorageAdapter.writeString(STORAGE_KEY_SFTP_AUTO_SYNC, String(settings.sftpAutoSync));
+  if (settings.sftpShowHiddenFiles != null) localStorageAdapter.writeString(STORAGE_KEY_SFTP_SHOW_HIDDEN_FILES, String(settings.sftpShowHiddenFiles));
+  if (settings.sftpUseCompressedUpload != null) localStorageAdapter.writeString(STORAGE_KEY_SFTP_USE_COMPRESSED_UPLOAD, String(settings.sftpUseCompressedUpload));
+  if (settings.sftpSkipUnchanged != null) localStorageAdapter.writeBoolean(STORAGE_KEY_SFTP_SKIP_UNCHANGED, settings.sftpSkipUnchanged);
+  if (settings.sftpAutoOpenSidebar != null) localStorageAdapter.writeString(STORAGE_KEY_SFTP_AUTO_OPEN_SIDEBAR, String(settings.sftpAutoOpenSidebar));
+  if (settings.sftpFollowTerminalCwd != null) localStorageAdapter.writeString(STORAGE_KEY_SFTP_FOLLOW_TERMINAL_CWD, String(settings.sftpFollowTerminalCwd));
+  if (settings.sftpDefaultViewMode != null) {
+    localStorageAdapter.writeString(STORAGE_KEY_SFTP_DEFAULT_VIEW_MODE, settings.sftpDefaultViewMode);
+  }
+
+  // SFTP Bookmarks (global only)
+  if (settings.sftpGlobalBookmarks != null) localStorageAdapter.write(STORAGE_KEY_SFTP_GLOBAL_BOOKMARKS, settings.sftpGlobalBookmarks);
+
+  if (settings.showRecentHosts != null) localStorageAdapter.writeBoolean(STORAGE_KEY_SHOW_RECENT_HOSTS, settings.showRecentHosts);
+  if (settings.hostClickBehavior === 'connect' || settings.hostClickBehavior === 'select') {
+    localStorageAdapter.writeString(STORAGE_KEY_HOST_CLICK_BEHAVIOR, settings.hostClickBehavior);
+  }
+  if (settings.showOnlyUngroupedHostsInRoot != null) {
+    localStorageAdapter.writeBoolean(
+      STORAGE_KEY_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT,
+      settings.showOnlyUngroupedHostsInRoot,
+    );
+  }
+  if (settings.showSftpTab != null) {
+    localStorageAdapter.writeBoolean(STORAGE_KEY_SHOW_SFTP_TAB, settings.showSftpTab);
+  }
+  if (settings.shellOnlyTabNumberShortcuts != null) {
+    localStorageAdapter.writeBoolean(STORAGE_KEY_SHELL_ONLY_TAB_NUMBER_SHORTCUTS, settings.shellOnlyTabNumberShortcuts);
+  }
+  if (settings.showTabNumberBadges != null) {
+    localStorageAdapter.writeBoolean(STORAGE_KEY_SHOW_TAB_NUMBER_BADGES, settings.showTabNumberBadges);
+  }
+  if (settings.disableTerminalFontZoom != null) {
+    localStorageAdapter.writeBoolean(STORAGE_KEY_DISABLE_TERMINAL_FONT_ZOOM, settings.disableTerminalFontZoom);
+  }
+  if (settings.showHostTreeSidebar != null) {
+    localStorageAdapter.writeBoolean(STORAGE_KEY_SHOW_HOST_TREE_SIDEBAR, settings.showHostTreeSidebar);
+  }
+  if (settings.workspaceFocusStyle != null) {
+    localStorageAdapter.writeString(STORAGE_KEY_WORKSPACE_FOCUS_STYLE, settings.workspaceFocusStyle);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a complete `SyncPayload` from local data.
+ *
+ * Port-forwarding rules are optional because they are managed by a separate
+ * state hook (`usePortForwardingState`).  Callers should strip transient
+ * runtime fields (status, error, lastUsedAt) before passing them in.
+ */
+export function buildSyncPayload(
+  vault: SyncableVaultData,
+  portForwardingRules?: PortForwardingRule[],
+): SyncPayload {
+  return {
+    hosts: sanitizeHostsForSync(vault.hosts),
+    keys: vault.keys,
+    identities: vault.identities,
+    proxyProfiles: vault.proxyProfiles,
+    snippets: vault.snippets,
+    customGroups: vault.customGroups,
+    snippetPackages: vault.snippetPackages,
+    notes: vault.notes,
+    noteGroups: vault.noteGroups,
+    groupConfigs: vault.groupConfigs,
+    portForwardingRules: sanitizePortForwardingRulesForSync(portForwardingRules),
+    settings: collectSyncableSettings(),
+    syncedAt: Date.now(),
+  };
+}
+
+export type PluginSyncSidecarCollector = () =>
+  | Promise<SyncPayload['pluginSidecars'] | null | undefined>
+  | SyncPayload['pluginSidecars']
+  | null
+  | undefined;
+
+export type PluginSyncSidecarApplier = (
+  sidecars: SyncPayload['pluginSidecars'] | null | undefined,
+) => Promise<void> | void;
+
+/**
+ * Attach a host-collected plugin sidecar bundle to a cloud payload.
+ * Secrets must already be excluded by the collector; this only drops empty bundles.
+ */
+export function withPluginSyncSidecars(
+  payload: SyncPayload,
+  sidecars: SyncPayload['pluginSidecars'] | null | undefined,
+): SyncPayload {
+  // null/undefined: collector unavailable — leave payload field unchanged
+  // (callers should reattach last-known before upload).
+  if (sidecars == null) {
+    return payload;
+  }
+  // Explicit empty entries is a real reset and must remain on the wire so
+  // apply paths can distinguish it from a legacy payload missing the field.
+  return {
+    ...payload,
+    pluginSidecars: {
+      version: 1,
+      entries: Array.isArray(sidecars.entries) ? sidecars.entries : [],
+    },
+  };
+}
+
+async function defaultCollectPluginSyncSidecars(): Promise<SyncPayload['pluginSidecars'] | null | undefined> {
+  const { collectPluginSyncSidecarsFromHost } = await import('./pluginSyncSidecarBridge');
+  // Let operational failures (DB/runtime) propagate so cloud upload does not
+  // silently strip previously synced sidecars from the remote snapshot.
+  return collectPluginSyncSidecarsFromHost();
+}
+
+async function defaultApplyPluginSyncSidecars(
+  sidecars: SyncPayload['pluginSidecars'] | null | undefined,
+): Promise<void> {
+  const {
+    applyPluginSyncSidecarsFromHost,
+    isPluginSidecarHostUnavailableError,
+  } = await import('./pluginSyncSidecarBridge');
+  try {
+    await applyPluginSyncSidecarsFromHost(sidecars);
+  } catch (error) {
+    // Only tolerate the host-gated-off / manager-unavailable path so a later
+    // plugin-enabled session can still apply from last-known cache. DB/runtime
+    // failures must fail the surrounding sync so the same remote is retried.
+    if (isPluginSidecarHostUnavailableError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+export async function buildCloudSyncPayload(
+  vault: SyncableVaultData,
+  portForwardingRules?: PortForwardingRule[],
+  options?: {
+    collectPluginSidecars?: PluginSyncSidecarCollector;
+  },
+): Promise<SyncPayload> {
+  const base: SyncPayload = {
+    hosts: sanitizeHostsForSync(vault.hosts),
+    keys: vault.keys,
+    identities: vault.identities,
+    proxyProfiles: vault.proxyProfiles,
+    snippets: vault.snippets,
+    customGroups: vault.customGroups,
+    snippetPackages: vault.snippetPackages,
+    notes: vault.notes,
+    noteGroups: vault.noteGroups,
+    groupConfigs: vault.groupConfigs,
+    portForwardingRules: sanitizePortForwardingRulesForSync(portForwardingRules),
+    settings: await collectCloudSyncableSettings(),
+    syncedAt: Date.now(),
+  };
+  const collect = options?.collectPluginSidecars ?? defaultCollectPluginSyncSidecars;
+  const sidecars = await collect();
+  return withPluginSyncSidecars(base, sidecars);
+}
+
+/** Build a local backup/restore payload, including local-only trust records. */
+export function buildLocalVaultPayload(
+  vault: SyncableVaultData,
+  portForwardingRules?: PortForwardingRule[],
+): SyncPayload {
+  const base: SyncPayload = {
+    ...buildSyncPayload(vault, portForwardingRules),
+    // Keep device-local recent-connection timestamps in protective backups.
+    hosts: vault.hosts,
+    settings: collectLocalBackupSettings(),
+    knownHosts: vault.knownHosts,
+  };
+  // Protective backups must capture plugin sidecars so restore can recover
+  // plugin settings/baselines. Prefer the last successful host collect cache
+  // (sync). Callers that can await should use buildLocalVaultPayloadAsync.
+  try {
+    const raw = localStorageAdapter.read<{ version?: number; entries?: unknown }>(
+      SYNC_STORAGE_KEYS.PLUGIN_SIDECARS_LAST_KNOWN,
+    );
+    if (raw && Array.isArray(raw.entries)) {
+      return withPluginSyncSidecars(base, {
+        version: 1,
+        entries: raw.entries as NonNullable<SyncPayload['pluginSidecars']>['entries'],
+      });
+    }
+  } catch {
+    // ignore cache read failures; backup still carries vault entities
+  }
+  return base;
+}
+
+/**
+ * Async local backup payload that prefers a live host collect when available,
+ * then falls back to last-known cache. Use for protective/version-change backups.
+ */
+export async function buildLocalVaultPayloadAsync(
+  vault: SyncableVaultData,
+  portForwardingRules?: PortForwardingRule[],
+): Promise<SyncPayload> {
+  const base = buildLocalVaultPayload(vault, portForwardingRules);
+  const {
+    collectPluginSyncSidecarsFromHost,
+    isPluginSidecarHostUnavailableError,
+  } = await import('./pluginSyncSidecarBridge');
+  try {
+    const live = await collectPluginSyncSidecarsFromHost();
+    if (live) {
+      // Uploads may still defer wiping last-known until a successful sync
+      // commit, but protective/version-change backups must snapshot the live
+      // authoritative-empty bundle so restore cannot resurrect cleared plugin data.
+      return withPluginSyncSidecars(base, live);
+    }
+  } catch (error) {
+    // Only fall back to last-known when the host is gated off. Operational
+    // failures must abort protective backups so we never apply over data that
+    // was not captured in the safety snapshot.
+    if (!isPluginSidecarHostUnavailableError(error)) {
+      throw error;
+    }
+  }
+  return base;
+}
+
+/**
+ * Apply a downloaded `SyncPayload` to local state via the provided importers.
+ *
+ * This ensures both vault data and port-forwarding rules are imported
+ * consistently across windows.
+ */
+async function preparePayloadApply(
+  payload: SyncPayload,
+  importers: SyncPayloadImporters,
+  options: {
+    includeLocalOnlyData: boolean;
+    applyPluginSidecars?: PluginSyncSidecarApplier;
+    currentHosts?: Host[];
+  },
+): Promise<() => Promise<void>> {
+  // Portable payloads must never keep device-bound enc:v1 blobs. Strip them
+  // so a previously poisoned cloud/backup snapshot can still restore host
+  // shells and let the user re-enter secrets (#2702).
+  const sanitizedPayload = stripSyncPayloadEncryptedCredentials(payload);
+  // Prepare credentials before any vault or settings mutation. Encryption can
+  // fail when local credential storage is unavailable; reuse the result below.
+  const legacyLineTimestampsEnabled = sanitizedPayload.settings?.terminalSettings?.showLineTimestamps === true;
+  let hosts = migrateHostsFromLegacyLineTimestamps(sanitizedPayload.hosts, legacyLineTimestampsEnabled);
+  if (!options.includeLocalOnlyData) {
+    hosts = retainLocalHostLastConnectedAt(hosts, options.currentHosts) ?? hosts;
+  }
+  // Build the vault import object. Cloud sync intentionally ignores
+  // local-only trust records even if legacy cloud snapshots still carry them.
+  const vaultImport: Record<string, unknown> = {
+    hosts,
+    keys: sanitizedPayload.keys,
+    identities: sanitizedPayload.identities,
+    proxyProfiles: sanitizedPayload.proxyProfiles,
+    snippets: sanitizedPayload.snippets,
+    customGroups: sanitizedPayload.customGroups,
+  };
+  if (sanitizedPayload.snippetPackages !== undefined) {
+    vaultImport.snippetPackages = sanitizedPayload.snippetPackages;
+  }
+  if (sanitizedPayload.notes !== undefined) {
+    vaultImport.notes = sanitizedPayload.notes;
+  }
+  if (sanitizedPayload.noteGroups !== undefined) {
+    vaultImport.noteGroups = sanitizedPayload.noteGroups;
+  }
+  if (options.includeLocalOnlyData && sanitizedPayload.knownHosts !== undefined) {
+    vaultImport.knownHosts = sanitizedPayload.knownHosts;
+  }
+  if (Array.isArray(sanitizedPayload.groupConfigs)) {
+    vaultImport.groupConfigs = sanitizedPayload.groupConfigs;
+  }
+
+  return () => Promise.resolve(importers.importVaultData(JSON.stringify(vaultImport))).then(async () => {
+    // Only import port-forwarding rules when the payload explicitly carries
+    // them.  Absent field = "payload was created before this feature existed",
+    // so local rules are preserved.  Explicitly present [] = "remote has no
+    // rules, clear local state".
+    if (sanitizedPayload.portForwardingRules !== undefined && importers.importPortForwardingRules) {
+      importers.importPortForwardingRules(sanitizedPayload.portForwardingRules);
+    }
+
+    // Apply synced settings
+    if (sanitizedPayload.settings) {
+      await applySyncableSettings(sanitizedPayload.settings);
+      // Rehydrate in-memory bookmark snapshot after localStorage was updated
+      if (sanitizedPayload.settings.sftpGlobalBookmarks != null) rehydrateGlobalSftpBookmarks();
+      importers.onSettingsApplied?.();
+    }
+
+    // Plugin encrypted sidecars: only apply when the field is present so
+    // legacy payloads without pluginSidecars do not wipe installed settings.
+    if (Object.prototype.hasOwnProperty.call(sanitizedPayload, 'pluginSidecars')) {
+      const applySidecars = options.applyPluginSidecars ?? defaultApplyPluginSyncSidecars;
+      await applySidecars(sanitizedPayload.pluginSidecars ?? { version: 1, entries: [] });
+    }
+  });
+}
+
+export function prepareSyncPayloadApply(
+  payload: SyncPayload,
+  importers: SyncPayloadImporters,
+  options?: {
+    applyPluginSidecars?: PluginSyncSidecarApplier;
+    currentHosts?: Host[];
+  },
+): Promise<() => Promise<void>> {
+  return preparePayloadApply(payload, importers, {
+    includeLocalOnlyData: false,
+    applyPluginSidecars: options?.applyPluginSidecars,
+    currentHosts: options?.currentHosts,
+  });
+}
+
+export async function applySyncPayload(
+  ...args: Parameters<typeof prepareSyncPayloadApply>
+): Promise<void> {
+  const applyPreparedPayload = await prepareSyncPayloadApply(...args);
+  await applyPreparedPayload();
+}
+
+export async function prepareLocalVaultPayloadApply(
+  payload: SyncPayload,
+  importers: SyncPayloadImporters,
+  dependencies: {
+    prepareConvergentRestore?: (
+      payload: SyncPayload,
+    ) => Promise<() => Promise<void>>;
+  } = {},
+): Promise<() => Promise<void>> {
+  // Sanitize once so vault import and convergent replica commit share the
+  // same portable secrets view (no device-bound enc:v1 leftovers).
+  const sanitizedPayload = stripSyncPayloadEncryptedCredentials(payload);
+  const prepareConvergentRestore = dependencies.prepareConvergentRestore
+    ?? prepareRestoredPayloadConvergentWrites;
+  const applyPreparedPayload = await preparePayloadApply(sanitizedPayload, importers, { includeLocalOnlyData: true });
+  const commitConvergentRestore = await prepareConvergentRestore(sanitizedPayload);
+  return async () => {
+    await applyPreparedPayload();
+    await commitConvergentRestore();
+  };
+}
+
+export async function applyLocalVaultPayload(
+  payload: SyncPayload,
+  importers: SyncPayloadImporters,
+  dependencies: {
+    prepareConvergentRestore?: (
+      payload: SyncPayload,
+    ) => Promise<() => Promise<void>>;
+  } = {},
+): Promise<void> {
+  const applyPreparedPayload = await prepareLocalVaultPayloadApply(
+    payload,
+    importers,
+    dependencies,
+  );
+  await applyPreparedPayload();
+}

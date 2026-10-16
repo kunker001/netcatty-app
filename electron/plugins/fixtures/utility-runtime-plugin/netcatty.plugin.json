@@ -1,0 +1,18 @@
+{
+  "manifestVersion": 1,
+  "id": "com.netcatty.runtime-smoke-utility",
+  "name": "runtime-smoke-utility",
+  "version": "1.0.0",
+  "publisher": "netcatty",
+  "engines": {
+    "netcatty": ">=0.0.0",
+    "api": ">=0.1.0-internal <0.2.0"
+  },
+  "main": {
+    "node": "index.js"
+  },
+  "activationEvents": ["onStartupFinished"],
+  "permissions": {
+    "required": ["runtime.advanced", "storage"]
+  }
+}

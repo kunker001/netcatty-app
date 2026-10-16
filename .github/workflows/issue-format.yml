@@ -1,0 +1,152 @@
+name: issue-format
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  issues: write
+  # workflow_dispatch is allowed from GITHUB_TOKEN (unlike issues.reopened)
+  # so format recovery can start triage without a human re-dispatch.
+  actions: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    # Skip issues opened by bots (e.g. dependabot) and maintainers fixing format
+    if: >-
+      github.event.issue.user.type != 'Bot' &&
+      !contains(github.event.issue.labels.*.name, 'format-exempt')
+    steps:
+      - name: Checkout format helpers
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            scripts/ai-automation.cjs
+          sparse-checkout-cone-mode: false
+
+      - name: Validate title and body
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const auto = require(`${process.env.GITHUB_WORKSPACE}/scripts/ai-automation.cjs`);
+            const issue = context.payload.issue;
+            const errors = auto.getIssueFormatErrors(issue);
+            const labels = new Set(
+              (issue.labels || []).map((label) =>
+                typeof label === 'string' ? label : label.name
+              )
+            );
+            const formatOk = errors.length === 0;
+            const recovery = auto.shouldRecoverIssueFormat({
+              state: issue.state,
+              labels: [...labels],
+              formatOk,
+            });
+
+            if (formatOk) {
+              if (recovery.recover) {
+                // Dispatch FIRST while invalid-format is still present and the
+                // issue may still be closed. workflow_dispatch sets manual=true
+                // so classify is eligible even with the label. Only after a
+                // successful dispatch do we reopen / clear the label — so a
+                // failed dispatch leaves a recoverable state (Codex P2).
+                const ref =
+                  context.payload.repository?.default_branch || 'main';
+                try {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    workflow_id: 'ai-automation.yml',
+                    ref,
+                    inputs: {
+                      issue_number: String(issue.number),
+                    },
+                  });
+                  core.info(
+                    `Dispatched ai-automation for recovered issue #${issue.number}`,
+                  );
+                } catch (err) {
+                  core.setFailed(
+                    `Triage dispatch failed after format recovery; leaving invalid-format in place for retry: ${err.message}`,
+                  );
+                  return;
+                }
+
+                labels.delete('invalid-format');
+                const update = {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: [...labels],
+                };
+                if (recovery.reopen) {
+                  update.state = 'open';
+                }
+                await github.rest.issues.update(update);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: recovery.reopen
+                    ? '<!-- issue-format-bot --> Format looks good now. Reopening this issue and starting triage.'
+                    : '<!-- issue-format-bot --> Format looks good now. Starting triage.',
+                });
+              } else {
+                core.info('Issue format OK');
+              }
+              return;
+            }
+
+            const issueNumber = issue.number;
+            const marker = '<!-- issue-format-bot -->';
+            const bodyText = [
+              marker,
+              '## Issue format check failed',
+              '',
+              'This issue was closed automatically because it does not follow the required format.',
+              '',
+              ...errors.map((e) => `- ${e}`),
+              '',
+              '### How to resubmit',
+              '',
+              '1. Go to [New Issue](https://github.com/binaricat/Netcatty/issues/new/choose)',
+              '2. Pick **Bug Report** or **Feature Request**',
+              '3. Fill in every required field',
+              '4. Keep the `[Bug]` or `[Feature]` prefix in the title and add a clear summary after it (older app versions may use `Bug: ...`)',
+              '',
+              'For questions and open-ended discussion, use [GitHub Discussions](https://github.com/binaricat/Netcatty/discussions) instead.',
+              '',
+              'If you believe this was a mistake, reply here after fixing the title/body and a maintainer can reopen.',
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+            const alreadyNotified = comments.some((c) =>
+              (c.body || '').includes(marker)
+            );
+
+            if (!alreadyNotified) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: bodyText,
+              });
+            }
+
+            labels.add('invalid-format');
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              state: 'closed',
+              state_reason: 'not_planned',
+              labels: [...labels],
+            });

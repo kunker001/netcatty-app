@@ -1,0 +1,1084 @@
+name: build-packages
+
+# Trigger philosophy
+#  - Main pushes always run the package matrix. Pull requests run it only
+#    when packaging, native runtimes, or installer inputs change. Ordinary
+#    app changes are covered by the required test workflow's production build.
+#    Artifacts upload as workflow artifacts only; *no* release is published.
+#  - Tag push matching `v<MAJOR>.<MINOR>.<PATCH>` (with optional
+#    pre-release suffix like `v1.2.3-rc.1`) -> run the matrix and
+#    publish a GitHub Release. Loose tags like `v-test`, `vNEXT`, or
+#    `v1.0` no longer auto-publish.
+#  - Manual `workflow_dispatch` -> run the matrix on the selected ref.
+#    `publish_release` only publishes when the selected ref is also a
+#    strict version tag.
+#
+# The release job validates the exact same rule before publishing, so
+# adding branches/PRs above is safe; accidental tag-like branch names
+# won't leak a release.
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish GitHub Release after build"
+        type: boolean
+        default: false
+      mosh_bin_release:
+        description: "Release tag containing bundled mosh-client binaries"
+        type: string
+        default: ""
+      et_bin_release:
+        description: "Release tag containing bundled et (EternalTerminal) binaries"
+        type: string
+        default: ""
+  push:
+    branches:
+      - main
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-[0-9A-Za-z]*"
+  pull_request:
+    paths:
+      - ".github/workflows/build.yml"
+      - "components/AppLockGate.tsx"
+      - "components/TrayPanel.tsx"
+      - "index.tsx"
+      - "index.css"
+      - "build/**"
+      - "electron-builder.config.cjs"
+      - "electron/**"
+      - "!electron/**/*.test.*"
+      - "!electron/**/*.spec.*"
+      - "!electron/**/__tests__/**"
+      - "!electron/**/test/**"
+      - "!electron/**/tests/**"
+      - "!electron/**/example/**"
+      - "!electron/**/examples/**"
+      - "!electron/plugins/fixtures/**"
+      - "infrastructure/config/terminalFlowConstants.*"
+      - "lib/**/*.cjs"
+      - "lib/**/*.json"
+      - "package.json"
+      - "package-lock.json"
+      - "packages/plugin-*/**"
+      - "patches/**"
+      - "public/icon*"
+      - "resources/**"
+      - "scripts/afterPackMacUuid.cjs"
+      - "scripts/beforePackCursorSdk.cjs"
+      - "scripts/build-et/**"
+      - "scripts/build-mosh/**"
+      - "scripts/ensure-node-pty-linux.sh"
+      - "scripts/et-extra-resources.cjs"
+      - "scripts/fetch-et-binaries.cjs"
+      - "scripts/fetch-mosh-binaries.cjs"
+      - "scripts/linux/**"
+      - "scripts/mosh-extra-resources.cjs"
+      - "scripts/nodePtyConptyPatch.cjs"
+      - "scripts/patch-xterm-macos-column-selection.cjs"
+      - "scripts/patch-xterm-foreground-intense.cjs"
+      - "scripts/patch-xterm-webgl-atlas.cjs"
+      - "scripts/rebuildPatchedNodePty.cjs"
+      - "scripts/resolve-et-bin-release.cjs"
+      - "scripts/resolve-mosh-bin-release.cjs"
+      - "scripts/tray-panel-layout.live.test.cjs"
+      - "scripts/verify-linux-*.sh"
+      - "scripts/xterm-macos-column-selection.live.test.cjs"
+      - "skills/**"
+
+# A newer run for the same main push or PR cancels older in-progress work.
+# Publishing tag runs share a release group across push and manual dispatch;
+# every non-publishing manual run uses its own group so branch pushes and other
+# explicitly requested validations cannot cancel it.
+concurrency:
+  group: build-packages-${{ github.workflow }}-${{ startsWith(github.ref, 'refs/tags/') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)) && format('release-{0}', github.ref) || github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+env:
+  # npm retries only transient registry fetches; deterministic install or
+  # postinstall failures still fail immediately.
+  NPM_CONFIG_FETCH_RETRIES: "4"
+  NPM_CONFIG_FETCH_RETRY_FACTOR: "2"
+  NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: "1000"
+  NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: "10000"
+  MOSH_BIN_RELEASE: ${{ github.event.inputs.mosh_bin_release || vars.MOSH_BIN_RELEASE || '' }}
+  BUNDLE_MOSH: ${{ (startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release))) || (github.event_name == 'workflow_dispatch' && inputs.mosh_bin_release != '') }}
+  ET_BIN_RELEASE: ${{ github.event.inputs.et_bin_release || vars.ET_BIN_RELEASE || '' }}
+  BUNDLE_ET: ${{ (startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release))) || (github.event_name == 'workflow_dispatch' && inputs.et_bin_release != '') }}
+  STRICT_VERSION_REF_RE: '^refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[A-Za-z][0-9A-Za-z-]*|[0-9A-Za-z][0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[A-Za-z][0-9A-Za-z-]*|[0-9A-Za-z][0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+
+jobs:
+  resolve-mosh:
+    name: resolve bundled mosh-client
+    if: |
+      (
+        (startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)))
+        || (github.event_name == 'workflow_dispatch' && inputs.mosh_bin_release != '')
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      mosh_bin_release: ${{ steps.resolve.outputs.mosh_bin_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve bundled mosh-client release
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/resolve-mosh-bin-release.cjs
+          release="$(grep '^MOSH_BIN_RELEASE=' "$GITHUB_ENV" | tail -n 1 | cut -d= -f2-)"
+          if [[ -z "$release" ]]; then
+            echo "::error::MOSH_BIN_RELEASE was not resolved."
+            exit 1
+          fi
+          echo "mosh_bin_release=${release}" >> "$GITHUB_OUTPUT"
+
+  resolve-et:
+    name: resolve bundled et-client
+    if: |
+      (
+        (startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)))
+        || (github.event_name == 'workflow_dispatch' && inputs.et_bin_release != '')
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      et_bin_release: ${{ steps.resolve.outputs.et_bin_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve bundled et-client release
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/resolve-et-bin-release.cjs
+          release="$(grep '^ET_BIN_RELEASE=' "$GITHUB_ENV" | tail -n 1 | cut -d= -f2-)"
+          if [[ -z "$release" ]]; then
+            echo "::error::ET_BIN_RELEASE was not resolved."
+            exit 1
+          fi
+          echo "et_bin_release=${release}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build-${{ matrix.name }}
+    needs: [resolve-mosh, resolve-et]
+    if: |
+      always()
+      && (needs.resolve-mosh.result == 'success' || needs.resolve-mosh.result == 'skipped')
+      && (needs.resolve-et.result == 'success' || needs.resolve-et.result == 'skipped')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            os: macos-latest
+            pack_script: pack:mac
+          - name: windows
+            os: windows-latest
+            # Official Windows releases are x64-only for now. Bundled mosh/et
+            # are win32-x64, and win.target must not hard-code arm64 or the
+            # x64 job still emits broken win-arm64 / universal NSIS packages
+            # (#2570). Use pack:win-x64 until a dedicated arm64 job exists.
+            pack_script: pack:win-x64
+    env:
+      MOSH_BIN_RELEASE: ${{ needs.resolve-mosh.outputs.mosh_bin_release }}
+      ET_BIN_RELEASE: ${{ needs.resolve-et.outputs.et_bin_release }}
+      VITE_SYNC_GITHUB_CLIENT_ID: ${{ secrets.VITE_SYNC_GITHUB_CLIENT_ID }}
+      VITE_SYNC_GOOGLE_CLIENT_ID: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_ID }}
+      VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET }}
+      VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID }}
+    steps:
+      - name: Validate bundled mosh-client release
+        if: env.BUNDLE_MOSH == 'true'
+        shell: bash
+        env:
+          RESOLVE_MOSH_RESULT: ${{ needs.resolve-mosh.result }}
+        run: |
+          if [[ "$RESOLVE_MOSH_RESULT" != "success" || -z "$MOSH_BIN_RELEASE" ]]; then
+            echo "::error::Bundled mosh-client release was not resolved for this package build."
+            exit 1
+          fi
+
+      - name: Validate bundled et-client release
+        if: env.BUNDLE_ET == 'true'
+        shell: bash
+        env:
+          RESOLVE_ET_RESULT: ${{ needs.resolve-et.result }}
+        run: |
+          if [[ "$RESOLVE_ET_RESULT" != "success" || -z "$ET_BIN_RELEASE" ]]; then
+            echo "::error::Bundled et-client release was not resolved for this package build."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up MSVC developer command prompt
+        if: matrix.name == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Restore Electron download cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/Library/Caches/electron
+            ~/AppData/Local/electron/Cache
+            ~/.cache/electron-builder
+            ~/Library/Caches/electron-builder
+            ~/AppData/Local/electron-builder/Cache
+          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Test macOS Option column selection
+        if: matrix.name == 'macos'
+        run: npm run test:xterm-macos-selection
+
+      - name: Compile ConPTY test helpers
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $compiler = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $compiler)) { throw "csc.exe not found" }
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\netcatty-mosh-conpty" | Out-Null
+          & $compiler /nologo /target:exe /out:"$env:RUNNER_TEMP\netcatty-mosh-conpty\ssh.exe" electron\bridges\fixtures\mosh-conpty-fake-ssh.cs
+          if ($LASTEXITCODE -ne 0) { throw "failed to compile fake ssh" }
+          & $compiler /nologo /target:exe /out:"$env:RUNNER_TEMP\netcatty-mosh-conpty\mosh-client.exe" electron\bridges\fixtures\mosh-conpty-fake-client.cs
+          if ($LASTEXITCODE -ne 0) { throw "failed to compile fake mosh-client" }
+
+      - name: Test Mosh handshake through ConPTY
+        if: matrix.name == 'windows'
+        shell: pwsh
+        env:
+          NETCATTY_TEST_MOSH_SSH_EXE: ${{ runner.temp }}\netcatty-mosh-conpty\ssh.exe
+          NETCATTY_TEST_MOSH_CLIENT_EXE: ${{ runner.temp }}\netcatty-mosh-conpty\mosh-client.exe
+        run: |
+          node --test electron/bridges/moshHandshake.test.cjs
+          node electron/bridges/terminalBridge.moshConpty.integration.cjs
+
+      - name: Fetch bundled mosh-client
+        if: env.BUNDLE_MOSH == 'true'
+        shell: bash
+        run: |
+          if [[ "${{ matrix.name }}" == "macos" ]]; then
+            npm run fetch:mosh -- --platform=darwin --arch=universal
+          elif [[ "${{ matrix.name }}" == "windows" ]]; then
+            npm run fetch:mosh -- --platform=win32 --arch=x64
+          fi
+
+      - name: Fetch bundled et-client
+        if: env.BUNDLE_ET == 'true'
+        shell: bash
+        run: |
+          if [[ "${{ matrix.name }}" == "macos" ]]; then
+            npm run fetch:et -- --platform=darwin --arch=universal
+          elif [[ "${{ matrix.name }}" == "windows" ]]; then
+            npm run fetch:et -- --platform=win32 --arch=x64
+          fi
+
+      - name: Set version
+        shell: bash
+        run: |
+          # Strict semver matches v<MAJOR>.<MINOR>.<PATCH>[-pre]; loose
+          # tags / branches / PRs fall through to a semver-pre-release
+          # form (`0.0.0-sha-<short-sha>`) so npm pkg / electron-builder
+          # accept it. Non-semver versions (e.g. bare "abc1234") cause
+          # downstream tooling to error or pick weird codepaths.
+          if [[ "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-sha-${GITHUB_SHA:0:7}"
+          fi
+          echo "Setting version to ${VERSION}"
+          npm pkg set version="${VERSION}"
+
+      - name: Build package
+        env:
+          ELECTRON_BUILDER_PUBLISH: "never"
+          # macOS code signing & notarization (only for macOS builds)
+          CSC_LINK: ${{ matrix.name == 'macos' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.name == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.name == 'macos' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.name == 'macos' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.name == 'macos' && secrets.APPLE_TEAM_ID || '' }}
+        run: npm run ${{ matrix.pack_script }}
+
+      - name: Test tray panel layout
+        run: npm run test:tray-panel-layout
+
+      - name: Test tray panel layout at 200% scale on Windows
+        if: matrix.name == 'windows'
+        env:
+          NETCATTY_TRAY_LAYOUT_SCALE: "2"
+        run: npm run test:tray-panel-layout
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-${{ matrix.name }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.msi
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+            release/*.pacman
+            release/*.tar.gz
+            release/*.yml
+            release/*.blockmap
+          if-no-files-found: ignore
+
+  # Dedicated job for Linux x64 — builds inside AlmaLinux 8 (GLIBC 2.28)
+  # so native modules (node-pty, serialport) stay compatible with RHEL 8 /
+  # CentOS 8 / UOS / Deepin. Ubuntu 22.04 links against GLIBC 2.32–2.35,
+  # which crashes on those older hosts (see #2062).
+  #
+  # We previously used debian:buster for the same glibc floor, but Buster's
+  # g++ 8 cannot compile Electron 42 natives (`-std=gnu++20`). AlmaLinux 8
+  # keeps glibc 2.28 while gcc-toolset-13 provides a real C++20 toolchain.
+  # Link natives with -static-libstdc++ so the result does not require a
+  # newer system libstdc++ on RHEL 8 derivatives.
+  # Key: GLIBC < 2.34 also avoids the libpthread-merge symbol requirement.
+  build-linux-x64:
+    name: build-linux-x64
+    needs: [resolve-mosh, resolve-et]
+    if: |
+      always()
+      && (needs.resolve-mosh.result == 'success' || needs.resolve-mosh.result == 'skipped')
+      && (needs.resolve-et.result == 'success' || needs.resolve-et.result == 'skipped')
+    runs-on: ubuntu-latest
+    container:
+      # The GitHub runner already retries container pulls three times. Use the
+      # official Quay mirror to avoid the Docker Hub endpoint that repeatedly
+      # timed out in package validation.
+      image: quay.io/almalinuxorg/almalinux:8
+    env:
+      MOSH_BIN_RELEASE: ${{ needs.resolve-mosh.outputs.mosh_bin_release }}
+      ET_BIN_RELEASE: ${{ needs.resolve-et.outputs.et_bin_release }}
+      npm_config_arch: x64
+      npm_config_target_arch: x64
+      # Keep rebuilt natives portable to stock RHEL 8 libstdc++.
+      LDFLAGS: "-static-libstdc++ -static-libgcc"
+      VITE_SYNC_GITHUB_CLIENT_ID: ${{ secrets.VITE_SYNC_GITHUB_CLIENT_ID }}
+      VITE_SYNC_GOOGLE_CLIENT_ID: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_ID }}
+      VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET }}
+      VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID }}
+    steps:
+      - name: Validate bundled mosh-client release
+        if: env.BUNDLE_MOSH == 'true'
+        shell: bash
+        env:
+          RESOLVE_MOSH_RESULT: ${{ needs.resolve-mosh.result }}
+        run: |
+          if [[ "$RESOLVE_MOSH_RESULT" != "success" || -z "$MOSH_BIN_RELEASE" ]]; then
+            echo "::error::Bundled mosh-client release was not resolved for this package build."
+            exit 1
+          fi
+
+      - name: Validate bundled et-client release
+        if: env.BUNDLE_ET == 'true'
+        shell: bash
+        env:
+          RESOLVE_ET_RESULT: ${{ needs.resolve-et.result }}
+        run: |
+          if [[ "$RESOLVE_ET_RESULT" != "success" || -z "$ET_BIN_RELEASE" ]]; then
+            echo "::error::Bundled et-client release was not resolved for this package build."
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf -y --setopt=retries=4 --setopt=timeout=30 install epel-release
+          dnf -y --setopt=retries=4 --setopt=timeout=30 install \
+            curl ca-certificates \
+            gcc-toolset-13-gcc gcc-toolset-13-gcc-c++ make \
+            python3.11 python3.11-pip \
+            git file rpm-build binutils cpio elfutils \
+            libarchive gzip bzip2 xz zstd tar which findutils \
+            dpkg fakeroot \
+            fuse fuse-libs gtk3 nss libXScrnSaver libXtst alsa-lib \
+            at-spi2-atk libdrm mesa-libgbm libX11 libX11-xcb libxcb \
+            mesa-libGL pango cairo
+          # gcc-toolset-13: C++20 for Electron 42 natives; still links glibc 2.28.
+          GCC_TOOLSET_ROOT="/opt/rh/gcc-toolset-13/root"
+          echo "PATH=${GCC_TOOLSET_ROOT}/usr/bin:${PATH}" >> "${GITHUB_ENV}"
+          echo "CC=${GCC_TOOLSET_ROOT}/usr/bin/gcc" >> "${GITHUB_ENV}"
+          echo "CXX=${GCC_TOOLSET_ROOT}/usr/bin/g++" >> "${GITHUB_ENV}"
+          echo "DEVTOOLSET_ROOTPATH=${GCC_TOOLSET_ROOT}" >> "${GITHUB_ENV}"
+          export PATH="${GCC_TOOLSET_ROOT}/usr/bin:${PATH}"
+          gcc --version
+          g++ --version
+          # AlmaLinux 8's libarchive package is often library-only in minimal
+          # images (no /usr/bin/bsdtar). electron-builder pacman packaging needs
+          # bsdtar; pull a Debian tools package that runs on glibc 2.28.
+          # Prefer Buster (published as +deb10u1 on archive.debian.org).
+          if [[ ! -x /usr/bin/bsdtar ]]; then
+            echo "bsdtar missing; installing CLI from Debian libarchive-tools"
+            mkdir -p /tmp/bsdtar-deb
+            BSDTAR_DEB_URLS=(
+              "http://archive.debian.org/debian/pool/main/liba/libarchive/libarchive-tools_3.3.3-4+deb10u1_amd64.deb"
+              "http://archive.debian.org/debian/pool/main/liba/libarchive/libarchive-tools_3.2.2-2+deb9u2_amd64.deb"
+            )
+            BSDTAR_DEB_OK=0
+            for url in "${BSDTAR_DEB_URLS[@]}"; do
+              echo "trying ${url}"
+              if curl -fsSL --retry 4 --retry-connrefused --connect-timeout 20 --max-time 300 \
+                -o /tmp/libarchive-tools.deb "${url}"; then
+                BSDTAR_DEB_OK=1
+                break
+              fi
+              echo "download failed for ${url}"
+            done
+            if [[ "${BSDTAR_DEB_OK}" -ne 1 ]]; then
+              echo "::error::Could not download Debian libarchive-tools for bsdtar"
+              exit 1
+            fi
+            dpkg-deb -x /tmp/libarchive-tools.deb /tmp/bsdtar-deb
+            install -m 0755 /tmp/bsdtar-deb/usr/bin/bsdtar /usr/local/bin/bsdtar-bin
+            # Prefer system libarchive.so if present; fall back to the deb's.
+            if [[ ! -e /usr/lib64/libarchive.so.13 && -d /tmp/bsdtar-deb/usr/lib/x86_64-linux-gnu ]]; then
+              mkdir -p /usr/local/lib/bsdtar-libs
+              cp -a /tmp/bsdtar-deb/usr/lib/x86_64-linux-gnu/libarchive.so* /usr/local/lib/bsdtar-libs/ 2>/dev/null || true
+            fi
+            printf '%s\n' \
+              '#!/bin/bash' \
+              'unset LD_LIBRARY_PATH' \
+              'if [[ -d /usr/local/lib/bsdtar-libs ]]; then' \
+              '  export LD_LIBRARY_PATH=/usr/local/lib/bsdtar-libs' \
+              'fi' \
+              'exec /usr/local/bin/bsdtar-bin "$@"' \
+              > /usr/local/bin/bsdtar
+            chmod +x /usr/local/bin/bsdtar
+          fi
+          # Some fpm paths still look for xzmt even when payload compression
+          # is gzip; provide a multi-thread xz shim.
+          printf '%s\n' '#!/bin/sh' 'exec /usr/bin/xz -T0 "$@"' > /usr/local/bin/xzmt
+          chmod +x /usr/local/bin/xzmt
+          # electron-builder's portable fpm injects its own LD_LIBRARY_PATH.
+          # System tools (rpmbuild, bsdtar, ...) then exit 127 under that path.
+          # Wrap every packaging helper so child processes see a clean env.
+          # Use printf (not a bare heredoc): unindented heredoc body breaks GHA YAML.
+          wrap_clean_env() {
+            local name="$1"
+            local real=""
+            if [[ -x "/usr/bin/${name}" ]]; then
+              real="/usr/bin/${name}"
+            elif [[ -x "/usr/local/bin/${name}-bin" ]]; then
+              real="/usr/local/bin/${name}-bin"
+            elif command -v "${name}" >/dev/null 2>&1; then
+              real="$(command -v "${name}")"
+            else
+              return 0
+            fi
+            # Don't wrap our own wrapper recursively.
+            if [[ "${real}" == /usr/local/bin/* && "${name}" != "bsdtar" ]]; then
+              return 0
+            fi
+            if [[ "${name}" == "bsdtar" && -x /usr/local/bin/bsdtar-bin ]]; then
+              real="/usr/local/bin/bsdtar-bin"
+            fi
+            printf '%s\n' \
+              '#!/bin/bash' \
+              'unset LD_LIBRARY_PATH' \
+              "exec ${real} \"\$@\"" \
+              > "/usr/local/bin/${name}"
+            chmod +x "/usr/local/bin/${name}"
+          }
+          for cmd in rpmbuild bsdtar bsdcpio tar gzip xz strip cpio; do
+            wrap_clean_env "${cmd}"
+          done
+          # Re-apply bsdtar wrapper with optional lib path for the deb-extracted binary.
+          if [[ -x /usr/local/bin/bsdtar-bin ]]; then
+            printf '%s\n' \
+              '#!/bin/bash' \
+              'unset LD_LIBRARY_PATH' \
+              'if [[ -d /usr/local/lib/bsdtar-libs ]]; then' \
+              '  export LD_LIBRARY_PATH=/usr/local/lib/bsdtar-libs' \
+              'fi' \
+              'exec /usr/local/bin/bsdtar-bin "$@"' \
+              > /usr/local/bin/bsdtar
+            chmod +x /usr/local/bin/bsdtar
+          fi
+          # Fail early with diagnostics if packaging tools are missing.
+          for tool in rpmbuild bsdtar strip gzip xz xzmt; do
+            if ! command -v "${tool}" >/dev/null 2>&1; then
+              echo "::error::Required packaging tool not found: ${tool}"
+              ls -la /usr/bin/bsd* /usr/local/bin/bsd* 2>/dev/null || true
+              rpm -ql libarchive 2>/dev/null | head -n 40 || true
+              exit 1
+            fi
+            echo "found ${tool}: $(command -v "${tool}")"
+          done
+          rpmbuild --version
+          bsdtar --version | head -n 1
+          # Official Node 22 linux-x64 tarball (same major as other package jobs).
+          NODE_VERSION="$(curl -fsSL --retry 4 --retry-connrefused --connect-timeout 20 --max-time 300 \
+            https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt \
+            | awk '/node-v[0-9.]+-linux-x64\.tar\.xz$/{print $2; exit}' \
+            | sed -E 's/^node-(v[0-9.]+)-linux-x64\.tar\.xz$/\1/')"
+          if [[ -z "${NODE_VERSION}" ]]; then
+            echo "::error::Could not resolve latest Node 22 linux-x64 tarball version."
+            exit 1
+          fi
+          echo "Installing Node ${NODE_VERSION} from nodejs.org"
+          curl -fsSL --retry 4 --retry-connrefused --connect-timeout 20 --max-time 300 \
+            "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz" \
+            | tar -xJ -C /usr/local --strip-components=1
+          node -v
+          npm -v
+          # node-gyp 12 needs Python >=3.8; AlmaLinux 8 default is older.
+          alternatives --set python3 /usr/bin/python3.11 || ln -sfn /usr/bin/python3.11 /usr/local/bin/python3
+          python3 --version
+          echo "PYTHON=/usr/bin/python3.11" >> "${GITHUB_ENV}"
+          echo "npm_config_python=/usr/bin/python3.11" >> "${GITHUB_ENV}"
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Restore Electron download cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install deps
+        run: |
+          python3 --version
+          g++ --version
+          npm ci
+
+      - name: Set version
+        shell: bash
+        run: |
+          # See matrix job's Set version step for the strict-semver
+          # rationale; identical logic, duplicated because the Linux
+          # legs are standalone jobs.
+          if [[ "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-sha-${GITHUB_SHA:0:7}"
+          fi
+          echo "Setting version to ${VERSION}"
+          npm pkg set version="${VERSION}"
+
+      - name: Prepare node-pty Linux runtime
+        env:
+          npm_config_arch: x64
+        run: bash scripts/ensure-node-pty-linux.sh prepare x64
+
+      - name: Fetch bundled mosh-client
+        if: env.BUNDLE_MOSH == 'true'
+        run: npm run fetch:mosh -- --platform=linux --arch=x64
+
+      - name: Fetch bundled et-client
+        if: env.BUNDLE_ET == 'true'
+        run: npm run fetch:et -- --platform=linux --arch=x64
+
+      - name: Build package
+        env:
+          npm_config_arch: x64
+          ELECTRON_BUILDER_PUBLISH: "never"
+          # Natives are already rebuilt. Prefer system packaging tools so
+          # rpmbuild brp scripts do not pick up a toolset-only binary, and so
+          # /usr/local/bin/rpmbuild (clean-env wrapper) wins over /usr/bin.
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        run: |
+          set -euo pipefail
+          command -v node
+          command -v rpmbuild
+          command -v bsdtar
+          command -v gzip
+          command -v xzmt
+          for cmd in rpmbuild bsdtar; do
+            if ! head -n 2 "$(command -v "${cmd}")" | grep -q 'unset LD_LIBRARY_PATH'; then
+              echo "::warning::${cmd} on PATH is not the clean-env wrapper; packaging may fail with exit 127"
+            fi
+          done
+          npm run pack:linux-x64
+
+      - name: Verify packaged node-pty Linux runtime
+        run: bash scripts/ensure-node-pty-linux.sh verify x64
+
+      - name: Verify packaged deb artifact
+        run: bash scripts/verify-linux-deb-artifact.sh amd64
+
+      - name: Verify packaged rpm artifact
+        run: bash scripts/verify-linux-rpm-artifact.sh x86_64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+            release/*.pacman
+            release/*.yml
+            release/*.blockmap
+          if-no-files-found: ignore
+
+  # Dedicated job for Linux ARM64 — builds inside Debian Bullseye (GLIBC 2.31)
+  # to ensure compatibility with older distros like UOS/Deepin (GLIBC 2.28).
+  # Key: GLIBC < 2.34 avoids the libpthread-merge symbol requirement.
+  build-linux-arm64:
+    name: build-linux-arm64
+    needs: [resolve-mosh, resolve-et]
+    if: |
+      always()
+      && (needs.resolve-mosh.result == 'success' || needs.resolve-mosh.result == 'skipped')
+      && (needs.resolve-et.result == 'success' || needs.resolve-et.result == 'skipped')
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:bullseye
+    env:
+      MOSH_BIN_RELEASE: ${{ needs.resolve-mosh.outputs.mosh_bin_release }}
+      ET_BIN_RELEASE: ${{ needs.resolve-et.outputs.et_bin_release }}
+      npm_config_arch: arm64
+      npm_config_target_arch: arm64
+      VITE_SYNC_GITHUB_CLIENT_ID: ${{ secrets.VITE_SYNC_GITHUB_CLIENT_ID }}
+      VITE_SYNC_GOOGLE_CLIENT_ID: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_ID }}
+      VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET }}
+      VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID }}
+    steps:
+      - name: Validate bundled mosh-client release
+        if: env.BUNDLE_MOSH == 'true'
+        shell: bash
+        env:
+          RESOLVE_MOSH_RESULT: ${{ needs.resolve-mosh.result }}
+        run: |
+          if [[ "$RESOLVE_MOSH_RESULT" != "success" || -z "$MOSH_BIN_RELEASE" ]]; then
+            echo "::error::Bundled mosh-client release was not resolved for this package build."
+            exit 1
+          fi
+
+      - name: Validate bundled et-client release
+        if: env.BUNDLE_ET == 'true'
+        shell: bash
+        env:
+          RESOLVE_ET_RESULT: ${{ needs.resolve-et.result }}
+        run: |
+          if [[ "$RESOLVE_ET_RESULT" != "success" || -z "$ET_BIN_RELEASE" ]]; then
+            echo "::error::Bundled et-client release was not resolved for this package build."
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bullseye LTS ended on 2026-08-31; its security index is now frozen.
+          # Pin the final snapshot and waive expiry only for this archived source.
+          # APT still verifies its signature and every package's checksum.
+          sed -i '/ bullseye-security /d' /etc/apt/sources.list
+          printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260901T000000Z/ bullseye-security main\n' >> /etc/apt/sources.list
+          apt-get -o Acquire::Retries=4 update
+          apt-get -o Acquire::Retries=4 install -y curl build-essential python3 git libfuse2 file rpm \
+            libarchive-tools \
+            libglib2.0-0 libgtk-3-0 libnss3 libxss1 libxtst6 libasound2 \
+            libatk-bridge2.0-0 libdrm2 libgbm1 libx11-xcb1 libxcb-dri3-0
+          curl -fsSL --retry 4 --retry-all-errors --connect-timeout 20 --max-time 300 \
+            https://deb.nodesource.com/setup_22.x | bash -
+          apt-get -o Acquire::Retries=4 install -y nodejs
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Restore Electron download cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Set version
+        shell: bash
+        run: |
+          # See matrix job's Set version step for the strict-semver
+          # rationale; identical logic, duplicated because the Linux
+          # legs are standalone jobs.
+          if [[ "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-sha-${GITHUB_SHA:0:7}"
+          fi
+          echo "Setting version to ${VERSION}"
+          npm pkg set version="${VERSION}"
+
+      - name: Prepare node-pty Linux runtime
+        env:
+          npm_config_arch: arm64
+        run: bash scripts/ensure-node-pty-linux.sh prepare arm64
+
+      - name: Fetch bundled mosh-client
+        if: env.BUNDLE_MOSH == 'true'
+        run: npm run fetch:mosh -- --platform=linux --arch=arm64
+
+      - name: Fetch bundled et-client
+        if: env.BUNDLE_ET == 'true'
+        run: npm run fetch:et -- --platform=linux --arch=arm64
+
+      - name: Build package
+        env:
+          npm_config_arch: arm64
+          ELECTRON_BUILDER_PUBLISH: "never"
+        run: npm run pack:linux-arm64
+
+      - name: Verify packaged node-pty Linux runtime
+        run: bash scripts/ensure-node-pty-linux.sh verify arm64
+
+      - name: Verify packaged deb artifact
+        run: bash scripts/verify-linux-deb-artifact.sh arm64
+
+      - name: Verify packaged rpm artifact
+        run: bash scripts/verify-linux-rpm-artifact.sh aarch64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-arm64
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+            release/*.pacman
+            release/*.yml
+            release/*.blockmap
+          if-no-files-found: ignore
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    needs: [build, build-linux-x64, build-linux-arm64]
+    # Only release on a strict v<MAJOR>.<MINOR>.<PATCH>[-pre] tag.
+    # Manual workflow_dispatch can publish only when it is run from one
+    # of those tags. PRs and branch pushes skip this job.
+    if: |
+      startsWith(github.ref, 'refs/tags/v')
+      && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release))
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
+            echo "::error::Release tags must be v<MAJOR>.<MINOR>.<PATCH> or v<MAJOR>.<MINOR>.<PATCH>-<prerelease>."
+            exit 1
+          fi
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Verify update metadata files
+        run: |
+          missing=0
+          for f in latest-mac.yml latest.yml latest-linux.yml latest-linux-arm64.yml; do
+            if [ ! -f "artifacts/$f" ]; then
+              echo "::warning::Missing $f in merged artifacts, attempting recovery..."
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "Re-downloading individual artifacts to recover missing files..."
+            for name in netcatty-macos netcatty-windows netcatty-linux-x64 netcatty-linux-arm64; do
+              tmpdir="/tmp/artifact-${name}"
+              gh run download ${{ github.run_id }} --name "${name}" --dir "${tmpdir}" 2>/dev/null || true
+              if [ -d "${tmpdir}" ]; then
+                for yml in "${tmpdir}"/latest*.yml; do
+                  [ -f "$yml" ] && cp -v "$yml" artifacts/
+                done
+              fi
+            done
+            echo "After recovery:"
+            ls -la artifacts/*.yml
+          fi
+          # Final check — fail if any update yml is still missing
+          for f in latest-mac.yml latest.yml latest-linux.yml latest-linux-arm64.yml; do
+            if [ ! -f "artifacts/$f" ]; then
+              echo "::error::$f is still missing after recovery attempt"
+              exit 1
+            fi
+          done
+          echo "All update metadata files present."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify downloaded Linux amd64 deb artifact
+        run: |
+          deb_file="$(find artifacts -maxdepth 1 -type f -name '*-linux-amd64.deb' -print | sort | head -n 1)"
+          test -n "${deb_file}"
+          bash scripts/verify-linux-deb-artifact.sh amd64 "${deb_file}"
+
+      - name: Verify downloaded Linux arm64 deb artifact metadata
+        env:
+          VERIFY_LOAD: "0"
+        run: |
+          deb_file="$(find artifacts -maxdepth 1 -type f -name '*-linux-arm64.deb' -print | sort | head -n 1)"
+          test -n "${deb_file}"
+          bash scripts/verify-linux-deb-artifact.sh arm64 "${deb_file}"
+
+      - name: Generate Release Body
+        run: node .github/scripts/generate-release-note.js
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            artifacts/*.dmg
+            artifacts/*.zip
+            artifacts/*.exe
+            artifacts/*.AppImage
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.pacman
+            artifacts/*.yml
+            artifacts/*.blockmap
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+  update-nix-release:
+    name: update Nix release metadata
+    runs-on: ubuntu-latest
+    needs: release
+    if: |
+      startsWith(github.ref, 'refs/tags/v')
+      && !contains(github.ref_name, '-')
+      && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release))
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Update Nix release metadata
+        run: node .github/scripts/update-nix-release.js --artifacts artifacts --version "${GITHUB_REF_NAME#v}"
+
+      - name: Propose Nix release metadata
+        shell: bash
+        env:
+          # RELEASE_TOKEN remains the checkout credential for branch pushes.
+          # PR creation prefers the triage PAT, whose repository permissions
+          # include pull requests, and falls back to this job's scoped token.
+          GH_TOKEN: ${{ secrets.TRIAGE_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- nix/release.nix; then
+            echo "Nix release metadata is already current."
+            exit 0
+          fi
+          branch_prefix="automation/nix-release-${GITHUB_REF_NAME}"
+          branch="$branch_prefix"
+          desired_nix_blob="$(git hash-object -w nix/release.nix)"
+          git restore --worktree -- nix/release.nix
+          existing_prs="$(
+            gh pr list --base "$DEFAULT_BRANCH" --state open --limit 100 \
+              --json url,headRefName,headRepositoryOwner |
+              jq -r --arg prefix "$branch_prefix" --arg owner "$REPO_OWNER" '
+                map(select(
+                  .headRepositoryOwner.login == $owner and
+                  (
+                    .headRefName == $prefix or
+                    (.headRefName as $head |
+                      ($head | startswith($prefix + "-")) and
+                      (($head | ltrimstr($prefix + "-")) | test("^[0-9]+-[0-9]+$"))
+                    )
+                  )
+                )) |
+                .[] |
+                "\(.url)|\(.headRefName)"
+              '
+          )"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ -n "$existing_prs" ]]; then
+            existing_index=0
+            while IFS='|' read -r existing existing_branch; do
+              [[ -n "$existing" && -n "$existing_branch" ]] || continue
+              existing_index=$((existing_index + 1))
+              tracking_ref="refs/remotes/origin/nix-existing-${existing_index}"
+              git fetch --depth=1 origin \
+                "+refs/heads/${existing_branch}:${tracking_ref}"
+              remote_before="$(git rev-parse "$tracking_ref")"
+              live_before="$(
+                git ls-remote --heads origin "refs/heads/${existing_branch}" |
+                  awk '{print $1}'
+              )"
+              if [[ -z "$live_before" || "$live_before" != "$remote_before" ]]; then
+                echo "Existing Nix metadata branch changed while it was being checked; retry the workflow." >&2
+                exit 1
+              fi
+              git switch -C "$existing_branch" "$tracking_ref"
+              git cat-file blob "$desired_nix_blob" > nix/release.nix
+              if git diff --quiet -- nix/release.nix; then
+                echo "Nix metadata pull request is already current: $existing"
+                continue
+              fi
+              git add nix/release.nix
+              git commit -m "Update Nix release metadata for ${GITHUB_REF_NAME}"
+              git push \
+                --force-with-lease="refs/heads/${existing_branch}:${remote_before}" \
+                origin "HEAD:${existing_branch}"
+              echo "Updated Nix metadata pull request without rewriting its history: $existing"
+            done <<<"$existing_prs"
+            exit 0
+          fi
+          git switch -C "$branch"
+          git cat-file blob "$desired_nix_blob" > nix/release.nix
+          git add nix/release.nix
+          git commit -m "Update Nix release metadata for ${GITHUB_REF_NAME}"
+          candidate_tree="$(git rev-parse 'HEAD^{tree}')"
+          if ! git push --force-with-lease="refs/heads/${branch}:" origin "HEAD:${branch}"; then
+            remote_refs="$(git ls-remote --heads origin "refs/heads/${branch_prefix}*")"
+            if [[ -z "$remote_refs" ]]; then
+              echo "The create-only push failed and no reusable remote Nix branch was found." >&2
+              exit 1
+            fi
+            matching_branch=""
+            branch_index=0
+            while read -r _ remote_ref; do
+              [[ -n "$remote_ref" ]] || continue
+              remote_branch="${remote_ref#refs/heads/}"
+              if [[ "$remote_branch" == "$branch_prefix" ]]; then
+                :
+              elif [[ "$remote_branch" == "$branch_prefix"-* ]]; then
+                suffix="${remote_branch#"$branch_prefix"-}"
+                [[ "$suffix" =~ ^[0-9]+-[0-9]+$ ]] || continue
+              else
+                continue
+              fi
+              branch_index=$((branch_index + 1))
+              tracking_ref="refs/remotes/origin/nix-reuse-${branch_index}"
+              git fetch --depth=1 origin "+${remote_ref}:${tracking_ref}"
+              remote_after="$(git rev-parse "$tracking_ref")"
+              remote_tree="$(git rev-parse "${tracking_ref}^{tree}")"
+              live_after="$(git ls-remote --heads origin "$remote_ref" | awk '{print $1}')"
+              if [[ -n "$live_after" && "$live_after" == "$remote_after" && "$remote_tree" == "$candidate_tree" ]]; then
+                matching_branch="$remote_branch"
+                break
+              fi
+            done <<<"$remote_refs"
+            if [[ -n "$matching_branch" ]]; then
+              branch="$matching_branch"
+              echo "Remote Nix branch $branch already has the same metadata; reuse it without rewriting history."
+            else
+              branch="${branch}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              echo "Existing Nix branch has different or changing content; publishing safely to $branch instead."
+              git push --force-with-lease="refs/heads/${branch}:" origin "HEAD:${branch}"
+            fi
+          fi
+          existing="$(
+            gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls" \
+              -f state=open \
+              -f base="$DEFAULT_BRANCH" \
+              -f head="${REPO_OWNER}:${branch}" \
+              -f per_page=100 \
+              --jq '.[0].html_url // ""'
+          )"
+          if [[ -n "$existing" ]]; then
+            echo "Nix metadata pull request already exists: $existing"
+            exit 0
+          fi
+          gh pr create \
+            --base "$DEFAULT_BRANCH" \
+            --head "$branch" \
+            --title "Update Nix release metadata for ${GITHUB_REF_NAME}" \
+            --body "Automated release metadata update for ${GITHUB_REF_NAME}."
+
+  homebrew-tap:
+    name: bump homebrew tap
+    runs-on: ubuntu-latest
+    needs: release
+    # Do not use one global Actions concurrency group here: it keeps only one
+    # pending job. The bump script serializes pushes with compare-and-retry and
+    # refuses to replace a newer Cask version.
+    # Only stable release tags update the Cask. Prerelease tags
+    # (e.g. v1.2.0-rc.1) are skipped so brew users stay on stable.
+    if: |
+      startsWith(github.ref, 'refs/tags/v')
+      && !contains(github.ref_name, '-')
+      && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release))
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: netcatty-macos
+          path: artifacts/
+
+      - name: Bump Cask in binaricat/homebrew-netcatty
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          ARTIFACTS_DIR: artifacts
+        run: |
+          # Strip the leading "v" — Cask version is plain semver.
+          VERSION="${GITHUB_REF_NAME#v}"
+          export VERSION
+          bash .github/scripts/bump-homebrew-cask.sh

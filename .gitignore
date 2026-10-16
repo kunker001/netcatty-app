@@ -1,0 +1,186 @@
+# =============================================================================
+# Allowlist .gitignore (https://github.com/binaricat/Netcatty/issues/2534)
+#
+# Layer 1 - default-deny at the repository root
+# Layer 2 - re-include only paths that belong in git
+# Layer 3 - classical denylist for generated / local / secret artifacts
+#
+# Goal: a mistaken `git add .` (or an agent doing the same) cannot pick up
+# random root files, agent state dirs, env files, or build outputs.
+# =============================================================================
+
+# --- Layer 1: ignore everything at the repository root by default ---
+/*
+
+# --- Layer 2: allowlist root files ---
+!.gitattributes
+!.gitignore
+!.npmrc
+!AGENTS.md
+!App.tsx
+!CHANGELOG.md
+!CLAUDE.md
+!CODE_OF_CONDUCT.md
+!CODE_SIGNING_POLICY.md
+!CONTRIBUTING.md
+!ET_INTEGRATION_CHECKLIST.md
+!LICENSE
+!PRIVACY.md
+!README.ja-JP.md
+!README.md
+!README.zh-CN.md
+!README.zh-TW.md
+!electron-builder.config.cjs
+!eslint.config.js
+!flake.lock
+!flake.nix
+!global.d.ts
+!index.css
+!index.html
+!index.tsx
+!metadata.json
+!package-lock.json
+!package.json
+!tsconfig.json
+!types.ts
+!vite.config.ts
+
+# --- Layer 2: allowlist root directories ---
+# Un-ignore the directory entry, then everything under it. Git does not
+# traverse ignored directories, so both steps are required.
+!.github/
+!.github/**
+!.vscode/
+!.vscode/**
+!application/
+!application/**
+!build/
+!build/**
+!components/
+!components/**
+!docs/
+!docs/**
+!domain/
+!domain/**
+!electron/
+!electron/**
+!examples/
+!examples/**
+!infrastructure/
+!infrastructure/**
+!lib/
+!lib/**
+!nix/
+!nix/**
+!packages/
+!packages/**
+!patches/
+!patches/**
+!public/
+!public/**
+!resources/
+!resources/**
+!scripts/
+!scripts/**
+!skills/
+!skills/**
+!types/
+!types/**
+!android/
+!android/**
+
+# --- Layer 3: classical denylist (applies inside allowlisted trees) ---
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies and build outputs
+node_modules
+dist
+dist-ssr
+*.local
+.env*
+.DS_Store
+.eslintcache
+*.tsbuildinfo
+coverage
+.vite
+*.asar
+
+# Root / packaging outputs (also blocked by Layer 1; kept for nested paths)
+/build/*
+!/build/icons
+!/build/installer.nsh
+/electron/native/**/build
+/electron/bridges/windowsHelloHelper/build/
+/release
+/out
+/public/monaco
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Claude Code / Codex / other local agent state
+# (Root agent dirs are also blocked by Layer 1; nested copies stay denied.)
+.claude/
+.codex/
+.omo/
+.qoder
+.workbuddy
+.codebuddy
+.serena/
+.superpowers/
+.worktrees/
+
+# AI / Superpowers generated docs (local only)
+/docs/superpowers/
+
+# Dev-only electron-updater test config (not for production)
+/dev-app-update.yml
+
+# Test suite (local only, not committed)
+/tests/
+/vitest.config.ts
+
+# Android local / generated
+android/.gradle/
+android/.idea/
+android/build/
+android/app/build/
+android/local.properties
+android/*.apk
+android/app/release/
+
+# Windows VS Build environment scripts (local dev only)
+Directory.Build.props
+Directory.Build.targets
+build_with_vs.bat
+build_with_vs2022.bat
+
+# Bundled MoshCatty mosh-client binaries fetched at pack time by
+# scripts/fetch-mosh-binaries.cjs. resources/mosh/README.md is committed;
+# pure single-binary artifacts from binaricat/MoshCatty are never committed.
+/resources/mosh/*/mosh-client
+/resources/mosh/*/mosh-client.exe
+
+# Bundled EternalTerminal `et` client binaries fetched at pack time by
+# scripts/fetch-et-binaries.cjs. resources/et/README.md is committed; the
+# actual binaries (and any DLL bundle for dynamically-linked Windows builds)
+# are pulled from the dedicated et binary repository, never committed.
+/resources/et/*/et
+/resources/et/*/et.exe
+/resources/et/*/et-*-dlls/
+/resources/et/*/*.dll

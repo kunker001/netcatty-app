@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- PowerShell blue rounded square -->
+  <rect width="32" height="32" rx="6" fill="#012456"/>
+  <!-- PS> prompt -->
+  <text x="4" y="15" font-family="monospace" font-size="10" font-weight="bold" fill="#FFFFFF">PS</text>
+  <text x="4" y="27" font-family="monospace" font-size="12" font-weight="bold" fill="#2CA5E0">&gt;_</text>
+</svg>

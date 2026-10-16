@@ -1,0 +1,1291 @@
+import { Folder, FolderLock, Lock, Menu, MoreHorizontal, Plus, Settings } from 'lucide-react';
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { fromEditorTabId, isEditorTabId, toEditorTabId, useActiveTabId } from '../application/state/activeTabStore';
+import { topTabsSessionsEqual } from '../domain/topTabsSessionsEqual';
+import { isHostTreeWorkTabSurface } from '../application/app/workTabSurface';
+import { buildTabShortcutNumberById } from '../application/app/tabShortcutTargets';
+import { useShortcutModifierHeld } from '../application/state/useShortcutModifierHeld';
+import type { EditorTabChrome } from '../application/state/editorTabStore';
+import { collectSessionIds } from '../domain/workspace';
+import {
+  appendHostFromWorkspaceDrop,
+  resolveFocusSidebarDragKind,
+} from '../domain/focusSidebarHostDrop';
+import type { DynamicTabTitleMode, KeyBinding, TerminalTabDoubleClickBehavior } from '../domain/models';
+
+import { getTopTabInsertionTarget, getWorkspaceSessionDragId, hasWorkspaceSessionDrag } from '../application/state/terminalDragData';
+import {
+  useTerminalHostTreeLayoutWidth,
+  useTerminalHostTreeOpen,
+  useToggleTerminalHostTree,
+} from '../application/state/terminalHostTreeStore';
+import type { LogView } from '../application/state/logViewState';
+import { useWindowControls } from '../application/state/useWindowControls';
+import { useSettingsChromeStore } from '../application/state/settingsChromeStore';
+import { useI18n } from '../application/i18n/I18nProvider';
+import { Host, TerminalSession, Workspace } from '../types';
+import { cn } from '../lib/utils';
+import { Button } from './ui/button';
+import { ContextMenuItem, ContextMenuSeparator } from './ui/context-menu';
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
+import { SyncStatusButton } from './SyncStatusButton';
+import { GlobalSftpTransferCenter } from './GlobalSftpTransferCenter';
+import { TopTabsQuickControls } from './TopTabsQuickControls';
+import {
+  ActiveTabAutoScroller,
+  EditorTopTab,
+  LogViewTopTab,
+  PluginViewTopTab,
+  RootTopTab,
+  SessionTopTab,
+  scrollTopTabIntoComfortView,
+  WindowControls,
+  WorkspaceTopTab,
+} from './top-tabs/TopTabItems';
+import type { PluginViewTab } from '../application/state/pluginViewTabStore';
+import { TERMINAL_HOST_TREE_ANIMATION_MS } from '../application/state/terminalHostTreeAnimation';
+import {
+  scheduleAfterInstantThemeSwitch,
+  scheduleChromeLayoutAnimation,
+} from '../application/state/useActiveChromeTheme';
+import { useTopTabLifecycleAnimations } from './top-tabs/useTopTabLifecycleAnimations';
+
+// Helper styles for Electron drag regions (use type assertion to include non-standard WebkitAppRegion)
+const dragRegionStyle = { WebkitAppRegion: 'drag' } as React.CSSProperties;
+const dragRegionNoSelect = { WebkitAppRegion: 'drag', userSelect: 'none' } as React.CSSProperties;
+const noDragRegionStyle = { WebkitAppRegion: 'no-drag' } as React.CSSProperties;
+const emptyTabStyle: React.CSSProperties = {};
+
+export function computeHostTreeTabGutter(hostTreeLayoutWidth: number, toggleRight: number): number {
+  return Math.max(0, hostTreeLayoutWidth - toggleRight);
+}
+
+export function shouldShowHostTreeToggle({
+  enabled,
+  activeTabId,
+  logViewIds,
+  orderedTabs,
+  sessionIds,
+  workspaceIds,
+}: {
+  enabled: boolean;
+  activeTabId: string;
+  logViewIds?: ReadonlySet<string>;
+  orderedTabs: readonly string[];
+  sessionIds: ReadonlySet<string>;
+  workspaceIds: ReadonlySet<string>;
+}): boolean {
+  return isHostTreeWorkTabSurface({
+    enabled,
+    activeTabId,
+    logViewIds,
+    orderedTabs,
+    sessionIds,
+    workspaceIds,
+  });
+}
+
+export function shouldKeepHostTreeToggleSurface({
+  enabled,
+  activeWorkTabCount,
+}: {
+  enabled: boolean;
+  activeWorkTabCount: number;
+}): boolean {
+  return enabled && activeWorkTabCount > 0;
+}
+
+export function resolveWorkspaceSessionTabDropTarget({
+  targetTabId,
+  position,
+  draggedSessionId,
+  draggedWorkspaceId,
+  workspaces,
+}: {
+  targetTabId: string;
+  position: 'before' | 'after';
+  draggedSessionId: string;
+  draggedWorkspaceId: string;
+  workspaces: readonly Workspace[];
+}): { tabId: string; position: 'before' | 'after'; additionalTabIds: readonly string[] } {
+  const sourceWorkspace = workspaces.find((workspace) => workspace.id === draggedWorkspaceId);
+  const remainingSessionIds = sourceWorkspace
+    ? collectSessionIds(sourceWorkspace.root).filter((sessionId) => sessionId !== draggedSessionId)
+    : [];
+  const stableTargetTabId = targetTabId === draggedWorkspaceId && remainingSessionIds.length === 1
+    ? remainingSessionIds[0]
+    : targetTabId;
+
+  return {
+    tabId: stableTargetTabId,
+    position,
+    additionalTabIds: [draggedSessionId, stableTargetTabId],
+  };
+}
+
+interface TopTabsProps {
+  theme: 'dark' | 'light';
+  themePreference: 'dark' | 'light' | 'system';
+  hosts: Host[];
+  sessions: TerminalSession[];
+  orphanSessions: TerminalSession[];
+  workspaces: Workspace[];
+  logViews: LogView[];
+  orderedTabs: string[];
+  draggingSessionId: string | null;
+  isMacClient: boolean;
+  onCloseSession: (sessionId: string, e?: React.MouseEvent) => void;
+  onRenameSession: (sessionId: string) => void;
+  onCopySession: (sessionId: string) => void;
+  onDuplicateSession?: (sessionId: string) => void;
+  onCopySessionToNewWindow: (sessionId: string) => void;
+  onEditHost?: (host: Host) => void;
+  onRenameWorkspace: (workspaceId: string) => void;
+  onCopyWorkspace: (workspaceId: string) => void;
+  onCloseWorkspace: (workspaceId: string) => void;
+  onCloseLogView: (logViewId: string) => void;
+  onCloseTabsBatch: (targetIds: string[]) => void;
+  onOpenQuickSwitcher: () => void;
+  onThemeChange: (theme: 'dark' | 'light' | 'system') => void;
+  onOpenSettings: () => void;
+  onLockApp?: () => void;
+  appLockEnabled?: boolean;
+  windowOpacity: number;
+  setWindowOpacity: (opacity: number) => void;
+  onSyncNow?: () => Promise<void>;
+  onStartSessionDrag: (sessionId: string) => void;
+  onEndSessionDrag: () => void;
+  onReorderTabs: (draggedId: string, targetId: string, position: 'before' | 'after') => void;
+  onRemoveSessionFromWorkspace: (
+    sessionId: string,
+    tabInsertionTarget?: { tabId: string; position: 'before' | 'after'; additionalTabIds?: readonly string[] },
+  ) => void;
+  onAppendHostToWorkspace?: (workspaceId: string, hostId: string) => void;
+  showSftpTab: boolean;
+  showHostTreeSidebar: boolean;
+  switchTabKeyBinding: Pick<KeyBinding, 'mac' | 'pc'> | null;
+  dynamicTabTitleMode?: DynamicTabTitleMode;
+  tabDoubleClickBehavior: TerminalTabDoubleClickBehavior;
+  editorTabs: readonly EditorTabChrome[];
+  pluginViewTabs: readonly PluginViewTab[];
+  onClosePluginViewTab: (tabId: string) => void;
+  onRequestCloseEditorTab: (editorTabId: string) => void;
+  hostById: Map<string, Host>;
+}
+
+const TopTabsInner: React.FC<TopTabsProps> = ({
+  theme,
+  themePreference,
+  hosts,
+  sessions: sessionsProp,
+  orphanSessions,
+  workspaces,
+  logViews,
+  orderedTabs,
+  draggingSessionId,
+  isMacClient,
+  onCloseSession,
+  onRenameSession,
+  onCopySession,
+  onDuplicateSession,
+  onCopySessionToNewWindow,
+  onEditHost,
+  onRenameWorkspace,
+  onCopyWorkspace,
+  onCloseWorkspace,
+  onCloseLogView,
+  onCloseTabsBatch,
+  onOpenQuickSwitcher,
+  onThemeChange,
+  onOpenSettings,
+  onLockApp,
+  appLockEnabled,
+  windowOpacity,
+  setWindowOpacity,
+  onSyncNow,
+  onStartSessionDrag,
+  onEndSessionDrag,
+  onReorderTabs,
+  onRemoveSessionFromWorkspace,
+  onAppendHostToWorkspace,
+  showSftpTab,
+  showHostTreeSidebar,
+  switchTabKeyBinding,
+  dynamicTabTitleMode,
+  tabDoubleClickBehavior,
+  editorTabs,
+  pluginViewTabs,
+  onClosePluginViewTab,
+  onRequestCloseEditorTab,
+  hostById,
+}) => {
+  const { t } = useI18n();
+  const { maximize, isFullscreen, onFullscreenChanged } = useWindowControls();
+  const {
+    hotkeyScheme,
+    showTabNumberBadges,
+    shellOnlyTabNumberShortcuts,
+  } = useSettingsChromeStore();
+  const switchTabKey = hotkeyScheme === 'mac'
+    ? switchTabKeyBinding?.mac ?? null
+    : hotkeyScheme === 'pc'
+      ? switchTabKeyBinding?.pc ?? null
+      : null;
+  const shortcutModifierHeld = useShortcutModifierHeld(switchTabKey, hotkeyScheme);
+  const tabShortcutNumbers = useMemo(() => {
+    // Keep the tab bar quiet until the modifier for the active shortcut scheme
+    // is held, while retaining the existing setting as the master toggle.
+    if (!showTabNumberBadges || hotkeyScheme === 'disabled' || !shortcutModifierHeld) return null;
+    return buildTabShortcutNumberById({
+      showSftpTab,
+      shellOnlyTabNumberShortcuts,
+      orderedTabs,
+      editorTabIds: editorTabs.map((tab) => toEditorTabId(tab.id)),
+    });
+  }, [hotkeyScheme, showTabNumberBadges, showSftpTab, shellOnlyTabNumberShortcuts, shortcutModifierHeld, orderedTabs, editorTabs]);
+  const isHostTreeOpen = useTerminalHostTreeOpen();
+  const hostTreeLayoutWidth = useTerminalHostTreeLayoutWidth();
+  const toggleHostTree = useToggleTerminalHostTree();
+  const activeTabId = useActiveTabId();
+  // Presentation (dynamic title / coding-CLI icon) is applied per-tab inside
+  // SessionTopTab via usePresentedSession — do not remap the whole bar on
+  // every sibling title tick.
+  const sessions = sessionsProp;
+  const { getTabAnimationClass } = useTopTabLifecycleAnimations(orderedTabs);
+  const fixedLeftTabsRef = useRef<HTMLDivElement>(null);
+  const hostTreeToggleSlotRef = useRef<HTMLDivElement>(null);
+  const suppressHostTreeToggleClickRef = useRef(false);
+  const hostTreeGutterCloseRafRef = useRef<number | null>(null);
+  const cancelHostTreeChromeReadyRef = useRef<(() => void) | null>(null);
+  const cancelRootTabsCompactRef = useRef<(() => void) | null>(null);
+  const cancelChromeExitRef = useRef<(() => void) | null>(null);
+  const [hostTreeTabGutter, setHostTreeTabGutter] = useState(0);
+  const [hostTreeChromeReady, setHostTreeChromeReady] = useState(false);
+  const [hostTreeGutterExiting, setHostTreeGutterExiting] = useState(false);
+  const [rootTabsCompact, setRootTabsCompact] = useState(false);
+  const showWindowControls = !isMacClient;
+
+  // Tab reorder drag state
+  const [dropIndicator, setDropIndicator] = useState<{ tabId: string; position: 'before' | 'after' } | null>(null);
+  const [isDraggingForReorder, setIsDraggingForReorder] = useState(false);
+  const [hostDropWorkspaceId, setHostDropWorkspaceId] = useState<string | null>(null);
+  const draggedTabIdRef = useRef<string | null>(null);
+  const [isWindowFullscreen, setIsWindowFullscreen] = useState(false);
+
+  useEffect(() => {
+    if (!isMacClient) return;
+    let cancelled = false;
+    isFullscreen().then((value) => {
+      if (!cancelled) setIsWindowFullscreen(!!value);
+    });
+    const unsubscribe = onFullscreenChanged((value) => setIsWindowFullscreen(!!value));
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [isFullscreen, isMacClient, onFullscreenChanged]);
+
+  // Refs for scrollable tab container
+  const tabsContainerRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+  const [hasOverflow, setHasOverflow] = useState(false);
+
+  // Check scroll state
+  const updateScrollState = useCallback(() => {
+    const container = tabsContainerRef.current;
+    if (container) {
+      const hasScroll = container.scrollWidth > container.clientWidth;
+      setHasOverflow(hasScroll);
+      setCanScrollLeft(container.scrollLeft > 0);
+      setCanScrollRight(container.scrollLeft < container.scrollWidth - container.clientWidth - 1);
+    }
+  }, []);
+
+  // Update scroll state on mount and resize
+  useEffect(() => {
+    updateScrollState();
+    const container = tabsContainerRef.current;
+    if (container) {
+      // Translate vertical wheel to horizontal scroll so users can reach
+      // off-screen tabs with a standard mouse wheel. Trackpad gestures that
+      // already carry horizontal delta are left alone so native two-finger
+      // swiping still works.
+      const handleWheel = (e: WheelEvent) => {
+        if (e.deltaY !== 0 && e.deltaX === 0) {
+          e.preventDefault();
+          container.scrollLeft += e.deltaY;
+        }
+      };
+      container.addEventListener('scroll', updateScrollState);
+      container.addEventListener('wheel', handleWheel, { passive: false });
+      const resizeObserver = new ResizeObserver(updateScrollState);
+      resizeObserver.observe(container);
+      return () => {
+        container.removeEventListener('scroll', updateScrollState);
+        container.removeEventListener('wheel', handleWheel);
+        resizeObserver.disconnect();
+      };
+    }
+  }, [updateScrollState, orderedTabs]);
+
+  // Pre-compute lookup maps for O(1) access instead of O(n) find operations.
+  // Presentation overlay is applied inside SessionTopTab, not here.
+  const orphanSessionMap = useMemo(() => {
+    const map = new Map<string, TerminalSession>();
+    for (const s of orphanSessions) {
+      map.set(s.id, s);
+    }
+    return map;
+  }, [orphanSessions]);
+
+  const workspaceMap = useMemo(() => {
+    const map = new Map<string, Workspace>();
+    for (const w of workspaces) map.set(w.id, w);
+    return map;
+  }, [workspaces]);
+
+  const logViewMap = useMemo(() => {
+    const map = new Map<string, LogView>();
+    for (const lv of logViews) map.set(lv.id, lv);
+    return map;
+  }, [logViews]);
+
+  const hostMap = useMemo(() => {
+    const map = new Map<string, Host>();
+    for (const h of hosts) map.set(h.id, h);
+    return map;
+  }, [hosts]);
+
+  // Pre-compute session counts per workspace for O(1) access
+  const workspacePaneCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const s of sessions) {
+      if (s.workspaceId) {
+        counts.set(s.workspaceId, (counts.get(s.workspaceId) || 0) + 1);
+      }
+    }
+    return counts;
+  }, [sessions]);
+
+  const activeWorkTabCount = orderedTabs.length;
+  const showHostTreeToggle = shouldShowHostTreeToggle({
+    enabled: showHostTreeSidebar,
+    activeTabId,
+    logViewIds: new Set(logViewMap.keys()),
+    orderedTabs,
+    sessionIds: new Set(orphanSessionMap.keys()),
+    workspaceIds: new Set(workspaceMap.keys()),
+  });
+  const hasHostTreeToggleSurface = shouldKeepHostTreeToggleSurface({
+    enabled: showHostTreeSidebar,
+    activeWorkTabCount,
+  });
+  const effectiveShowHostTreeToggle = hostTreeChromeReady;
+
+  useEffect(() => {
+    cancelHostTreeChromeReadyRef.current?.();
+    cancelHostTreeChromeReadyRef.current = null;
+    cancelRootTabsCompactRef.current?.();
+    cancelRootTabsCompactRef.current = null;
+    cancelChromeExitRef.current?.();
+    cancelChromeExitRef.current = null;
+
+    if (!showHostTreeToggle) {
+      if (hostTreeChromeReady) {
+        setRootTabsCompact(false);
+        setHostTreeGutterExiting(true);
+        const gutterRaf = window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => setHostTreeTabGutter(0));
+        });
+        const timer = window.setTimeout(() => {
+          cancelChromeExitRef.current = null;
+          setHostTreeChromeReady(false);
+          setHostTreeGutterExiting(false);
+        }, TERMINAL_HOST_TREE_ANIMATION_MS);
+        cancelChromeExitRef.current = () => {
+          window.cancelAnimationFrame(gutterRaf);
+          window.clearTimeout(timer);
+        };
+      } else {
+        setHostTreeChromeReady(false);
+        setHostTreeGutterExiting(false);
+        setRootTabsCompact(false);
+      }
+      return () => {
+        cancelChromeExitRef.current?.();
+        cancelChromeExitRef.current = null;
+      };
+    }
+
+    if (!hostTreeChromeReady) {
+      cancelHostTreeChromeReadyRef.current = scheduleAfterInstantThemeSwitch(() => {
+        cancelHostTreeChromeReadyRef.current = null;
+        setHostTreeChromeReady(true);
+      });
+    }
+
+    if (!rootTabsCompact) {
+      cancelRootTabsCompactRef.current = scheduleChromeLayoutAnimation(() => {
+        cancelRootTabsCompactRef.current = null;
+        setRootTabsCompact(true);
+      });
+    }
+
+    return () => {
+      cancelHostTreeChromeReadyRef.current?.();
+      cancelHostTreeChromeReadyRef.current = null;
+      cancelRootTabsCompactRef.current?.();
+      cancelRootTabsCompactRef.current = null;
+    };
+  }, [hostTreeChromeReady, rootTabsCompact, showHostTreeToggle]);
+
+  const updateHostTreeTabGutter = useCallback((options?: { deferClose?: boolean }) => {
+    if (hostTreeGutterExiting) return;
+
+    if (!effectiveShowHostTreeToggle || hostTreeLayoutWidth <= 0) {
+      if (!effectiveShowHostTreeToggle && options?.deferClose) {
+        if (hostTreeGutterCloseRafRef.current !== null) {
+          window.cancelAnimationFrame(hostTreeGutterCloseRafRef.current);
+        }
+        hostTreeGutterCloseRafRef.current = window.requestAnimationFrame(() => {
+          hostTreeGutterCloseRafRef.current = null;
+          setHostTreeTabGutter(0);
+        });
+        return;
+      }
+      setHostTreeTabGutter(0);
+      return;
+    }
+    if (hostTreeGutterCloseRafRef.current !== null) {
+      window.cancelAnimationFrame(hostTreeGutterCloseRafRef.current);
+      hostTreeGutterCloseRafRef.current = null;
+    }
+    const root = tabsContainerRef.current?.closest('[data-top-tabs-root]') as HTMLElement | null;
+    const toggleSlot = hostTreeToggleSlotRef.current;
+    if (!root || !toggleSlot) {
+      setHostTreeTabGutter(Math.max(0, hostTreeLayoutWidth));
+      return;
+    }
+    const rootLeft = root.getBoundingClientRect().left;
+    const toggleRight = toggleSlot.getBoundingClientRect().right - rootLeft;
+    setHostTreeTabGutter(computeHostTreeTabGutter(hostTreeLayoutWidth, toggleRight));
+  }, [effectiveShowHostTreeToggle, hostTreeGutterExiting, hostTreeLayoutWidth]);
+
+  const updateHostTreeTabGutterRef = useRef(updateHostTreeTabGutter);
+  updateHostTreeTabGutterRef.current = updateHostTreeTabGutter;
+
+  useLayoutEffect(() => {
+    updateHostTreeTabGutter({ deferClose: true });
+  }, [hostTreeLayoutWidth, updateHostTreeTabGutter]);
+
+  useLayoutEffect(() => {
+    const syncGutter = () => updateHostTreeTabGutterRef.current();
+    updateHostTreeTabGutterRef.current({ deferClose: true });
+    const rafId = window.requestAnimationFrame(() => syncGutter());
+    const settleTimer = window.setTimeout(syncGutter, 320);
+    const root = tabsContainerRef.current?.closest('[data-top-tabs-root]') as HTMLElement | null;
+    const ro = new ResizeObserver(() => syncGutter());
+    if (root) ro.observe(root);
+    if (fixedLeftTabsRef.current) ro.observe(fixedLeftTabsRef.current);
+    if (tabsContainerRef.current) ro.observe(tabsContainerRef.current);
+    if (hostTreeToggleSlotRef.current) ro.observe(hostTreeToggleSlotRef.current);
+    window.addEventListener('resize', syncGutter);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      if (hostTreeGutterCloseRafRef.current !== null) {
+        window.cancelAnimationFrame(hostTreeGutterCloseRafRef.current);
+        hostTreeGutterCloseRafRef.current = null;
+      }
+      window.clearTimeout(settleTimer);
+      ro.disconnect();
+      window.removeEventListener('resize', syncGutter);
+    };
+  }, [
+    orderedTabs.length,
+    showSftpTab,
+    isWindowFullscreen,
+    effectiveShowHostTreeToggle,
+    isHostTreeOpen,
+  ]);
+
+  const handleTabDragStart = useCallback((e: React.DragEvent, tabId: string) => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('tab-reorder-id', tabId);
+    // Also set session-id for backward compatibility with workspace split functionality
+    // Only orphan sessions can be dragged to create workspaces
+    const isOrphanSession = orphanSessionMap.has(tabId);
+    if (isOrphanSession) {
+      e.dataTransfer.setData('session-id', tabId);
+    }
+    draggedTabIdRef.current = tabId;
+    // Use setTimeout to allow the drag image to be captured before we change styles
+    setTimeout(() => {
+      setIsDraggingForReorder(true);
+    }, 0);
+    onStartSessionDrag(tabId);
+  }, [orphanSessionMap, onStartSessionDrag]);
+
+  const handleTabDragEnd = useCallback(() => {
+    draggedTabIdRef.current = null;
+    setDropIndicator(null);
+    setIsDraggingForReorder(false);
+    setHostDropWorkspaceId(null);
+    onEndSessionDrag();
+  }, [onEndSessionDrag]);
+
+  const handleTabDragOver = useCallback((e: React.DragEvent, tabId: string) => {
+    const dragKind = resolveFocusSidebarDragKind({ types: e.dataTransfer.types });
+    if (dragKind === 'host-append') {
+      if (!onAppendHostToWorkspace || !workspaceMap.has(tabId)) {
+        setHostDropWorkspaceId(null);
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'copy';
+      setDropIndicator(null);
+      setHostDropWorkspaceId(tabId);
+      return;
+    }
+
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setHostDropWorkspaceId(null);
+
+    if (hasWorkspaceSessionDrag(e.dataTransfer)) {
+      setDropIndicator(null);
+      return;
+    }
+
+    if (!draggedTabIdRef.current || draggedTabIdRef.current === tabId) {
+      return;
+    }
+
+    // Determine if we're on the left or right half of the target tab
+    const rect = e.currentTarget.getBoundingClientRect();
+    const midpoint = rect.left + rect.width / 2;
+    const position: 'before' | 'after' = e.clientX < midpoint ? 'before' : 'after';
+
+    // Always update drop indicator on drag over to ensure it doesn't get stuck
+    setDropIndicator({ tabId, position });
+  }, [onAppendHostToWorkspace, workspaceMap]);
+
+  const handleTabDragLeave = useCallback((e: React.DragEvent) => {
+    const next = e.relatedTarget;
+    if (next instanceof Node && e.currentTarget.contains(next)) return;
+    setHostDropWorkspaceId(null);
+    // Don't clear drop indicator on drag leave - let onDragOver manage it
+    // This prevents the indicator from flickering/disappearing during fast drags
+    // The indicator will be cleared when drag ends or on drop
+  }, []);
+
+  const handleTabDrop = useCallback((e: React.DragEvent, targetTabId: string) => {
+    const dragKind = resolveFocusSidebarDragKind({ types: e.dataTransfer.types });
+    if (dragKind === 'host-append') {
+      const handled = Boolean(
+        onAppendHostToWorkspace
+        && workspaceMap.has(targetTabId)
+        && appendHostFromWorkspaceDrop({
+          types: e.dataTransfer.types,
+          getData: (type) => e.dataTransfer.getData(type),
+          workspaceId: targetTabId,
+          onAppendHostToWorkspace,
+        }),
+      );
+      setHostDropWorkspaceId(null);
+      setDropIndicator(null);
+      if (!handled) return;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    e.preventDefault();
+    setHostDropWorkspaceId(null);
+    if (hasWorkspaceSessionDrag(e.dataTransfer)) {
+      const draggedSessionId = getWorkspaceSessionDragId(e.dataTransfer);
+      const draggedSession = sessions.find((s) => s.id === draggedSessionId);
+      if (draggedSession?.workspaceId) {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const position: 'before' | 'after' = e.clientX < rect.left + rect.width / 2 ? 'before' : 'after';
+        onRemoveSessionFromWorkspace(draggedSessionId, resolveWorkspaceSessionTabDropTarget({
+          targetTabId,
+          position,
+          draggedSessionId,
+          draggedWorkspaceId: draggedSession.workspaceId,
+          workspaces,
+        }));
+        setDropIndicator(null);
+        setIsDraggingForReorder(false);
+        onEndSessionDrag();
+        return;
+      }
+    }
+
+    const draggedId = e.dataTransfer.getData('tab-reorder-id') || draggedTabIdRef.current;
+
+    if (draggedId && draggedId !== targetTabId && dropIndicator) {
+      onReorderTabs(draggedId, targetTabId, dropIndicator.position);
+    }
+
+    setDropIndicator(null);
+    setIsDraggingForReorder(false);
+  }, [dropIndicator, onAppendHostToWorkspace, onEndSessionDrag, onRemoveSessionFromWorkspace, onReorderTabs, sessions, workspaceMap, workspaces]);
+
+  const handleTabBarDrop = useCallback((e: React.DragEvent) => {
+    if (!hasWorkspaceSessionDrag(e.dataTransfer)) return;
+    const draggedSessionId = getWorkspaceSessionDragId(e.dataTransfer);
+    if (!draggedSessionId) return;
+    const draggedSession = sessions.find((s) => s.id === draggedSessionId);
+    if (!draggedSession?.workspaceId) return;
+    e.preventDefault();
+    const root = e.currentTarget.closest('[data-top-tabs-root]') as HTMLElement | null;
+    const insertionTarget = getTopTabInsertionTarget(e, root);
+    onRemoveSessionFromWorkspace(
+      draggedSessionId,
+      insertionTarget
+        ? resolveWorkspaceSessionTabDropTarget({
+            targetTabId: insertionTarget.tabId,
+            position: insertionTarget.position,
+            draggedSessionId,
+            draggedWorkspaceId: draggedSession.workspaceId,
+            workspaces,
+          })
+        : undefined,
+    );
+    setDropIndicator(null);
+    setIsDraggingForReorder(false);
+    onEndSessionDrag();
+  }, [onEndSessionDrag, onRemoveSessionFromWorkspace, sessions, workspaces]);
+
+  const handleScrollableTabClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('button')) return;
+    const tab = target.closest('[data-tab-id]') as HTMLElement | null;
+    if (!tab || !e.currentTarget.contains(tab)) return;
+    scrollTopTabIntoComfortView(e.currentTarget, tab, 'smooth');
+  }, []);
+
+  const handleHostTreeTogglePointerDown = useCallback((e: React.PointerEvent) => {
+    if (!effectiveShowHostTreeToggle) return;
+    e.preventDefault();
+    e.stopPropagation();
+    suppressHostTreeToggleClickRef.current = true;
+    toggleHostTree();
+  }, [effectiveShowHostTreeToggle, toggleHostTree]);
+
+  const handleHostTreeToggleClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (suppressHostTreeToggleClickRef.current) {
+      suppressHostTreeToggleClickRef.current = false;
+      return;
+    }
+    if (!effectiveShowHostTreeToggle) return;
+    toggleHostTree();
+  }, [effectiveShowHostTreeToggle, toggleHostTree]);
+
+  // Pre-compute tab shift styles for all tabs to avoid recalculation during render
+  const tabShiftStyles = useMemo(() => {
+    if (!dropIndicator || !isDraggingForReorder || !draggedTabIdRef.current) {
+      return {};
+    }
+    const styles: Record<string, React.CSSProperties> = {};
+    const draggedIndex = orderedTabs.indexOf(draggedTabIdRef.current);
+    const targetIndex = orderedTabs.indexOf(dropIndicator.tabId);
+    const dropIndex = dropIndicator.position === 'before' ? targetIndex : targetIndex + 1;
+
+    for (let i = 0; i < orderedTabs.length; i++) {
+      const tabId = orderedTabs[i];
+      if (tabId === draggedTabIdRef.current) continue;
+
+      if (draggedIndex < dropIndex) {
+        if (i > draggedIndex && i < dropIndex) {
+          styles[tabId] = { transform: 'translateX(-8px)' };
+        }
+      } else {
+        if (i >= dropIndex && i < draggedIndex) {
+          styles[tabId] = { transform: 'translateX(8px)' };
+        }
+      }
+    }
+    return styles;
+  }, [dropIndicator, isDraggingForReorder, orderedTabs]);
+
+  // Pre-compute editor tab map for O(1) access (chrome fields only; dirty via store).
+  const editorTabMap = useMemo(() => {
+    const map = new Map<string, EditorTabChrome>();
+    for (const t of editorTabs) map.set(t.id, t);
+    return map;
+  }, [editorTabs]);
+
+  const pluginViewTabMap = useMemo(
+    () => new Map(pluginViewTabs.map((tab) => [tab.id, tab])),
+    [pluginViewTabs],
+  );
+
+  // fileName → count, for the rename-disambiguation suffix in the render loop.
+  // Memoed so we don't do a per-tab O(n) filter on every render (was O(n²)).
+  const editorTabFileNameCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const t of editorTabs) counts.set(t.fileName, (counts.get(t.fileName) ?? 0) + 1);
+    return counts;
+  }, [editorTabs]);
+
+  // Build ordered tab items using pre-computed maps for O(1) lookups
+  const orderedTabItems = useMemo(() => {
+    return orderedTabs.map((tabId) => {
+      if (isEditorTabId(tabId)) {
+        const editorId = fromEditorTabId(tabId);
+        const editorTab = editorTabMap.get(editorId);
+        if (!editorTab) return null;
+        return { type: 'editor' as const, id: tabId, editorTab };
+      }
+      const pluginViewTab = pluginViewTabMap.get(tabId);
+      if (pluginViewTab) return { type: 'pluginView' as const, id: tabId, pluginViewTab };
+      const session = orphanSessionMap.get(tabId);
+      const workspace = workspaceMap.get(tabId);
+      const logView = logViewMap.get(tabId);
+      if (session) {
+        return { type: 'session' as const, id: tabId, session };
+      }
+      if (workspace) {
+        return { type: 'workspace' as const, id: tabId, workspace, paneCount: workspacePaneCounts.get(tabId) || 0 };
+      }
+      if (logView) {
+        return { type: 'logView' as const, id: tabId, logView };
+      }
+      return null;
+    }).filter(Boolean);
+  }, [orderedTabs, editorTabMap, pluginViewTabMap, orphanSessionMap, workspaceMap, logViewMap, workspacePaneCounts]);
+
+  // Bulk-close menu items shared by session and workspace context menus.
+  // Anchor is the tab the user right-clicked on (matches VSCode/JetBrains UX).
+  const renderBulkCloseItems = useCallback((anchorId: string) => {
+    const anchorIdx = orderedTabs.indexOf(anchorId);
+    const othersIds = orderedTabs.filter((id) => id !== anchorId);
+    const rightIds = anchorIdx >= 0 ? orderedTabs.slice(anchorIdx + 1) : [];
+    const leftIds = anchorIdx > 0 ? orderedTabs.slice(0, anchorIdx) : [];
+    return (
+      <>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          disabled={othersIds.length === 0}
+          onClick={() => onCloseTabsBatch(othersIds)}
+        >
+          {t('tabs.closeOthers')}
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={leftIds.length === 0}
+          onClick={() => onCloseTabsBatch(leftIds)}
+        >
+          {t('tabs.closeToLeft')}
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={rightIds.length === 0}
+          onClick={() => onCloseTabsBatch(rightIds)}
+        >
+          {t('tabs.closeToRight')}
+        </ContextMenuItem>
+        <ContextMenuItem
+          className="text-destructive"
+          onClick={() => onCloseTabsBatch(orderedTabs)}
+        >
+          {t('tabs.closeAll')}
+        </ContextMenuItem>
+      </>
+    );
+  }, [onCloseTabsBatch, orderedTabs, t]);
+
+  // Render the tabs
+  const renderOrderedTabs = () => {
+    return orderedTabItems.map((item) => {
+      if (!item) return null;
+
+      if (item.type === 'editor') {
+        const { editorTab } = item;
+        const tabId = item.id;
+        const host = hostById.get(editorTab.hostId);
+        // Disambiguate duplicate filenames using the memoed counts map.
+        const suffix = (editorTabFileNameCounts.get(editorTab.fileName) ?? 0) > 1
+          ? ` · ${editorTab.remotePath.split('/').slice(-2, -1)[0] || '/'}`
+          : '';
+
+        const isBeingDragged = draggingSessionId === tabId;
+        const shiftStyle = tabShiftStyles[tabId] || emptyTabStyle;
+        const showDropIndicatorBefore = dropIndicator?.tabId === tabId && dropIndicator.position === 'before';
+        const showDropIndicatorAfter = dropIndicator?.tabId === tabId && dropIndicator.position === 'after';
+
+        return (
+          <EditorTopTab
+            key={tabId}
+            tabId={tabId}
+            editorTab={editorTab}
+            host={host}
+            suffix={suffix}
+            onRequestCloseEditorTab={onRequestCloseEditorTab}
+            isBeingDragged={isBeingDragged}
+            isDraggingForReorder={isDraggingForReorder}
+            shiftStyle={shiftStyle}
+            showDropIndicatorBefore={showDropIndicatorBefore}
+            showDropIndicatorAfter={showDropIndicatorAfter}
+            onTabDragStart={handleTabDragStart}
+            onTabDragEnd={handleTabDragEnd}
+            onTabDragOver={handleTabDragOver}
+            onTabDragLeave={handleTabDragLeave}
+            onTabDrop={handleTabDrop}
+            tabAnimationClass={getTabAnimationClass(tabId)}
+            shortcutNumber={tabShortcutNumbers?.get(tabId)}
+          />
+        );
+      }
+
+      if (item.type === 'pluginView') {
+        const tabId = item.id;
+        return (
+          <PluginViewTopTab
+            key={tabId}
+            tab={item.pluginViewTab}
+            onClose={onClosePluginViewTab}
+            renderBulkCloseItems={renderBulkCloseItems}
+            t={t}
+            isBeingDragged={draggingSessionId === tabId}
+            isDraggingForReorder={isDraggingForReorder}
+            shiftStyle={tabShiftStyles[tabId] || emptyTabStyle}
+            showDropIndicatorBefore={dropIndicator?.tabId === tabId && dropIndicator.position === 'before'}
+            showDropIndicatorAfter={dropIndicator?.tabId === tabId && dropIndicator.position === 'after'}
+            onTabDragStart={handleTabDragStart}
+            onTabDragEnd={handleTabDragEnd}
+            onTabDragOver={handleTabDragOver}
+            onTabDragLeave={handleTabDragLeave}
+            onTabDrop={handleTabDrop}
+            tabAnimationClass={getTabAnimationClass(tabId)}
+            shortcutNumber={tabShortcutNumbers?.get(tabId)}
+          />
+        );
+      }
+
+      if (item.type === 'session') {
+        const session = item.session;
+        const isBeingDragged = draggingSessionId === session.id;
+        const shiftStyle = tabShiftStyles[session.id] || emptyTabStyle;
+        const showDropIndicatorBefore = dropIndicator?.tabId === session.id && dropIndicator.position === 'before';
+        const showDropIndicatorAfter = dropIndicator?.tabId === session.id && dropIndicator.position === 'after';
+
+        return (
+          <SessionTopTab
+            key={session.id}
+            session={session}
+            host={hostMap.get(session.hostId)}
+            isBeingDragged={isBeingDragged}
+            isDraggingForReorder={isDraggingForReorder}
+            shiftStyle={shiftStyle}
+            showDropIndicatorBefore={showDropIndicatorBefore}
+            showDropIndicatorAfter={showDropIndicatorAfter}
+            onTabDragStart={handleTabDragStart}
+            onTabDragEnd={handleTabDragEnd}
+            onTabDragOver={handleTabDragOver}
+            onTabDragLeave={handleTabDragLeave}
+            onTabDrop={handleTabDrop}
+            onCloseSession={onCloseSession}
+            onRenameSession={onRenameSession}
+            onCopySession={onCopySession}
+            onDuplicateSession={onDuplicateSession}
+            onCopySessionToNewWindow={onCopySessionToNewWindow}
+            onEditHost={onEditHost}
+            renderBulkCloseItems={renderBulkCloseItems}
+            dynamicTabTitleMode={dynamicTabTitleMode}
+            tabDoubleClickBehavior={tabDoubleClickBehavior}
+            t={t}
+            tabAnimationClass={getTabAnimationClass(session.id)}
+            shortcutNumber={tabShortcutNumbers?.get(session.id)}
+          />
+        );
+      }
+
+      if (item.type === 'workspace') {
+        const workspace = item.workspace;
+        const paneCount = item.paneCount;
+        const isBeingDragged = draggingSessionId === workspace.id;
+        const shiftStyle = tabShiftStyles[workspace.id] || emptyTabStyle;
+        const showDropIndicatorBefore = dropIndicator?.tabId === workspace.id && dropIndicator.position === 'before';
+        const showDropIndicatorAfter = dropIndicator?.tabId === workspace.id && dropIndicator.position === 'after';
+        const workspaceSessionIds = collectSessionIds(workspace.root);
+        // Detach-menu labels resolve presentation inside WorkspaceTopTab so
+        // dynamic title updates stay live without remapping the whole bar.
+        const workspaceSessions = workspaceSessionIds
+          .map((sessionId) => sessions.find((s) => s.id === sessionId))
+          .filter((s): s is TerminalSession => Boolean(s));
+
+        return (
+          <WorkspaceTopTab
+            key={workspace.id}
+            workspace={workspace}
+            paneCount={paneCount}
+            workspaceSessionIds={workspaceSessionIds}
+            workspaceSessions={workspaceSessions}
+            dynamicTabTitleMode={dynamicTabTitleMode}
+            isBeingDragged={isBeingDragged}
+            isDraggingForReorder={isDraggingForReorder}
+            shiftStyle={shiftStyle}
+            showDropIndicatorBefore={showDropIndicatorBefore}
+            showDropIndicatorAfter={showDropIndicatorAfter}
+            isHostDropTarget={hostDropWorkspaceId === workspace.id}
+            onTabDragStart={handleTabDragStart}
+            onTabDragEnd={handleTabDragEnd}
+            onTabDragOver={handleTabDragOver}
+            onTabDragLeave={handleTabDragLeave}
+            onTabDrop={handleTabDrop}
+            onRenameWorkspace={onRenameWorkspace}
+            onCopyWorkspace={onCopyWorkspace}
+            onCloseWorkspace={onCloseWorkspace}
+            onDetachSessionFromWorkspace={(_workspaceId, sessionId) => onRemoveSessionFromWorkspace(sessionId)}
+            renderBulkCloseItems={renderBulkCloseItems}
+            t={t}
+            tabAnimationClass={getTabAnimationClass(workspace.id)}
+            shortcutNumber={tabShortcutNumbers?.get(workspace.id)}
+          />
+        );
+      }
+
+      if (item.type === 'logView') {
+        const logView = item.logView;
+        const isBeingDragged = draggingSessionId === logView.id;
+        const shiftStyle = tabShiftStyles[logView.id] || emptyTabStyle;
+        const showDropIndicatorBefore = dropIndicator?.tabId === logView.id && dropIndicator.position === 'before';
+        const showDropIndicatorAfter = dropIndicator?.tabId === logView.id && dropIndicator.position === 'after';
+
+        return (
+          <LogViewTopTab
+            key={logView.id}
+            logView={logView}
+            onCloseLogView={onCloseLogView}
+            isBeingDragged={isBeingDragged}
+            isDraggingForReorder={isDraggingForReorder}
+            shiftStyle={shiftStyle}
+            showDropIndicatorBefore={showDropIndicatorBefore}
+            showDropIndicatorAfter={showDropIndicatorAfter}
+            onTabDragStart={handleTabDragStart}
+            onTabDragEnd={handleTabDragEnd}
+            onTabDragOver={handleTabDragOver}
+            onTabDragLeave={handleTabDragLeave}
+            onTabDrop={handleTabDrop}
+            t={t}
+            tabAnimationClass={getTabAnimationClass(logView.id)}
+            shortcutNumber={tabShortcutNumbers?.get(logView.id)}
+          />
+        );
+      }
+
+      return null;
+    });
+  };
+
+  // Handle double-click on titlebar to maximize/restore window (Windows/Linux)
+  const handleTitleBarDoubleClick = useCallback((e: React.MouseEvent) => {
+    // Only handle double-click on the drag region itself, not on buttons/tabs
+    if ((e.target as HTMLElement).closest('.app-no-drag')) return;
+    if (!isMacClient) {
+      maximize();
+    }
+  }, [isMacClient, maximize]);
+
+  return (
+    <div
+      data-top-tabs-root
+      data-section="top-tabs"
+      className="relative w-full bg-secondary app-drag"
+      style={{
+        ...dragRegionNoSelect,
+        backgroundColor: 'var(--top-tabs-bg, hsl(var(--secondary)))',
+        color: 'var(--top-tabs-fg, hsl(var(--foreground)))',
+      }}
+      onDoubleClick={handleTitleBarDoubleClick}
+    >
+      <ActiveTabAutoScroller
+        tabsContainerRef={tabsContainerRef}
+        updateScrollState={updateScrollState}
+      />
+      {/* Always-on drag stripe so the window can be moved even when tabs fill the bar */}
+      <div className="absolute inset-x-0 top-0 h-1 app-drag pointer-events-auto z-10" style={dragRegionStyle} aria-hidden />
+      <div
+        className="h-9 flex items-end gap-0 app-drag overflow-visible"
+        style={{
+          ...dragRegionStyle,
+          paddingLeft: isMacClient && !isWindowFullscreen ? 76 : 12,
+          paddingRight: showWindowControls ? 0 : 12,
+        }}
+      >
+        {/* Fixed left tabs: Vaults and SFTP */}
+        <div ref={fixedLeftTabsRef} className="flex items-end gap-0 flex-shrink-0 app-drag">
+          <RootTopTab
+            tabId="vault"
+            label="Vaults"
+            icon={<FolderLock size={14} />}
+            className="rounded"
+            compact={rootTabsCompact}
+            shortcutNumber={tabShortcutNumbers?.get('vault')}
+          />
+          {showSftpTab && (
+            <RootTopTab
+              tabId="sftp"
+              label="SFTP"
+              icon={<Folder size={14} />}
+              className="rounded-t-md"
+              compact={rootTabsCompact}
+              shortcutNumber={tabShortcutNumbers?.get('sftp')}
+            />
+          )}
+        </div>
+
+        {/* Scrollable tabs container with fade masks */}
+        <div
+          className="relative min-w-0 flex-1 flex app-drag"
+          style={dragRegionStyle}
+          // Add container-level drag handlers to prevent indicator loss
+          onDragOver={(e) => {
+            if (hasWorkspaceSessionDrag(e.dataTransfer)) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              return;
+            }
+            // Keep drop indicator active while dragging over the container
+            if (draggedTabIdRef.current && isDraggingForReorder && !dropIndicator) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+            }
+          }}
+          onDrop={handleTabBarDrop}
+        >
+          {hasHostTreeToggleSurface && (
+            <div
+              ref={hostTreeToggleSlotRef}
+              className="top-tab-host-tree-toggle-slot mb-0 flex-shrink-0 self-end app-no-drag"
+              data-section="top-tabs-host-tree-toggle"
+              data-visible={effectiveShowHostTreeToggle ? 'true' : 'false'}
+              style={noDragRegionStyle}
+            >
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    data-tab-type="host-tree-toggle"
+                    data-state={isHostTreeOpen ? 'active' : 'inactive'}
+                    className={cn(
+                      'h-7 w-7 flex-shrink-0 app-no-drag rounded-none hover:bg-transparent',
+                    )}
+                    style={{
+                      color: isHostTreeOpen
+                        ? 'var(--top-tabs-fg, hsl(var(--foreground)))'
+                        : 'var(--top-tabs-muted, hsl(var(--muted-foreground)))',
+                      pointerEvents: effectiveShowHostTreeToggle ? 'auto' : 'none',
+                      ...noDragRegionStyle,
+                    }}
+                    onPointerDown={handleHostTreeTogglePointerDown}
+                    onClick={handleHostTreeToggleClick}
+                  >
+                    <Menu size={14} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {isHostTreeOpen ? t('terminal.layer.hostTree.collapse') : t('terminal.layer.hostTree.expand')}
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          )}
+          {hasHostTreeToggleSurface && (
+            <div
+              className={cn(
+                'top-tab-host-tree-gutter flex-shrink-0',
+                hostTreeGutterExiting && 'top-tab-host-tree-gutter-exit',
+              )}
+              style={{ width: hostTreeTabGutter }}
+              aria-hidden
+            />
+          )}
+
+          <div className="relative min-w-0 flex-1 flex app-drag" style={dragRegionStyle}>
+            {/* Left fade mask */}
+            {canScrollLeft && (
+              <div
+                className="absolute left-0 top-0 bottom-0 w-8 pointer-events-none z-10"
+                style={{ background: 'linear-gradient(to right, var(--top-tabs-bg, hsl(var(--secondary))), transparent)' }}
+              />
+            )}
+
+            {/* Scrollable container */}
+            <div
+              ref={tabsContainerRef}
+              className="flex items-end gap-0 overflow-x-auto scrollbar-none app-drag max-w-full"
+              style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+              onClick={handleScrollableTabClick}
+              onDragOver={(e) => {
+                if (hasWorkspaceSessionDrag(e.dataTransfer)) {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                }
+              }}
+              onDrop={handleTabBarDrop}
+            >
+              {renderOrderedTabs()}
+              {/* Add new tab button - follows last tab when not overflowing */}
+              {!hasOverflow && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      data-section="top-tabs-quick-switcher-toggle"
+                      className="h-7 w-7 flex-shrink-0 app-no-drag mb-0 rounded-none"
+                      style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
+                      onClick={onOpenQuickSwitcher}
+                    >
+                      <Plus size={14} />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{t('topTabs.openQuickSwitcher')}</TooltipContent>
+                </Tooltip>
+              )}
+              {/* Draggable spacer - fixed width handle at the end */}
+              <div className="min-w-[20px] h-7 app-drag flex-shrink-0" style={dragRegionStyle} />
+            </div>
+
+            {/* Right fade mask */}
+            {canScrollRight && (
+              <div
+                className="absolute right-0 top-0 bottom-0 w-8 pointer-events-none z-10"
+                style={{ background: 'linear-gradient(to left, var(--top-tabs-bg, hsl(var(--secondary))), transparent)' }}
+              />
+            )}
+          </div>
+
+        </div>
+
+        {/* More tabs button - only when overflowing */}
+        {hasOverflow && (
+          <div className="contents" data-section="top-tabs-toolbar-actions">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 flex-shrink-0 app-no-drag self-end rounded-none"
+                  style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
+                  onClick={onOpenQuickSwitcher}
+                >
+                  <MoreHorizontal size={14} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t('topTabs.moreTabs')}</TooltipContent>
+            </Tooltip>
+          </div>
+        )}
+
+        {/* Right controls share the tab row. */}
+        <div
+          className="flex-shrink-0 flex items-center gap-0.5 app-drag h-7 overflow-visible self-end"
+          style={dragRegionStyle}
+          data-section="top-tabs-toolbar-actions"
+        >
+          <GlobalSftpTransferCenter />
+          <SyncStatusButton
+            onOpenSettings={onOpenSettings}
+            onSyncNow={onSyncNow}
+            className="h-7 w-7 shrink-0 top-tab-utility-btn"
+            style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
+          />
+          {appLockEnabled && onLockApp && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 shrink-0 app-no-drag top-tab-utility-btn"
+                  style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
+                  onClick={onLockApp}
+                >
+                  <Lock size={16} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t('topTabs.lockApp')}</TooltipContent>
+            </Tooltip>
+          )}
+          <TopTabsQuickControls
+            theme={theme}
+            themePreference={themePreference}
+            onThemeChange={onThemeChange}
+            windowOpacity={windowOpacity}
+            setWindowOpacity={setWindowOpacity}
+            style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
+          />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 app-no-drag top-tab-utility-btn"
+                style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
+                onClick={onOpenSettings}
+              >
+                <Settings size={16} />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t('topTabs.openSettings')}</TooltipContent>
+          </Tooltip>
+          {showWindowControls && <WindowControls />}
+        </div>
+        {/* Small drag shim to the right edge (macOS only – on Windows the close button should touch the edge) */}
+        {isMacClient && !showWindowControls && (
+          <div className="w-2 h-9 app-drag flex-shrink-0 self-end" />
+        )}
+      </div>
+    </div>
+  );
+};
+
+// Custom comparison: only re-render when data props change - activeTabId is now managed internally via store subscription
+export const topTabsAreEqual = (prev: TopTabsProps, next: TopTabsProps): boolean => {
+  return (
+    prev.theme === next.theme &&
+    prev.hosts === next.hosts &&
+    // Ignore presentation-only session fields; SessionTopTab merges live titles
+    // via usePresentedSession (per-tab snapshot).
+    topTabsSessionsEqual(prev.sessions, next.sessions) &&
+    topTabsSessionsEqual(prev.orphanSessions, next.orphanSessions) &&
+    prev.workspaces === next.workspaces &&
+    prev.orderedTabs === next.orderedTabs &&
+    prev.logViews === next.logViews &&
+    // Editor open/close/fileName chrome only (presence list). Dirty dots use store.
+    prev.editorTabs === next.editorTabs &&
+    prev.onRequestCloseEditorTab === next.onRequestCloseEditorTab &&
+    prev.pluginViewTabs === next.pluginViewTabs &&
+    prev.onClosePluginViewTab === next.onClosePluginViewTab &&
+    prev.draggingSessionId === next.draggingSessionId &&
+    prev.isMacClient === next.isMacClient &&
+    prev.onCopySession === next.onCopySession &&
+    prev.onDuplicateSession === next.onDuplicateSession &&
+    prev.onCopySessionToNewWindow === next.onCopySessionToNewWindow &&
+    prev.onEditHost === next.onEditHost &&
+    prev.onAppendHostToWorkspace === next.onAppendHostToWorkspace &&
+    prev.onCopyWorkspace === next.onCopyWorkspace &&
+    prev.onOpenSettings === next.onOpenSettings &&
+    prev.onLockApp === next.onLockApp &&
+    prev.appLockEnabled === next.appLockEnabled &&
+    prev.windowOpacity === next.windowOpacity &&
+    prev.setWindowOpacity === next.setWindowOpacity &&
+    prev.onSyncNow === next.onSyncNow &&
+    prev.themePreference === next.themePreference &&
+    prev.onThemeChange === next.onThemeChange &&
+    prev.showSftpTab === next.showSftpTab &&
+    prev.showHostTreeSidebar === next.showHostTreeSidebar &&
+    prev.switchTabKeyBinding === next.switchTabKeyBinding &&
+    prev.dynamicTabTitleMode === next.dynamicTabTitleMode &&
+    prev.tabDoubleClickBehavior === next.tabDoubleClickBehavior &&
+    prev.hostById === next.hostById
+  );
+};
+
+export const TopTabs = memo(TopTabsInner, topTabsAreEqual);
+TopTabs.displayName = 'TopTabs';

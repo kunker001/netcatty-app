@@ -1,0 +1,18 @@
+{
+  "manifestVersion": 1,
+  "id": "com.netcatty.runtime-smoke-browser",
+  "name": "runtime-smoke-browser",
+  "version": "1.0.0",
+  "publisher": "netcatty",
+  "engines": {
+    "netcatty": ">=0.0.0",
+    "api": ">=0.1.0-internal <0.2.0"
+  },
+  "main": {
+    "browser": "index.js"
+  },
+  "activationEvents": ["onStartupFinished"],
+  "permissions": {
+    "required": ["storage"]
+  }
+}

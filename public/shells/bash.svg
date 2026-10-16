@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Dark charcoal rounded square -->
+  <rect width="32" height="32" rx="6" fill="#2D2D2D"/>
+  <!-- Green $_ prompt, bold and centered -->
+  <text x="7" y="21" font-family="monospace" font-size="16" font-weight="bold" fill="#4EC9B0">$_</text>
+</svg>

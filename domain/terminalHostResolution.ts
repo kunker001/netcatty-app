@@ -1,0 +1,164 @@
+import type { GroupConfig, Host, ProxyProfile, TerminalSession } from "./models";
+import { applyGroupDefaults, resolveGroupDefaults } from "./groupConfig";
+import { materializeHostProxyProfile } from "./proxyProfiles";
+import { sanitizePluginConnection } from "./pluginConnection";
+
+type LocalOs = Host["os"];
+
+interface ResolveEffectiveHostOptions {
+  host: Host;
+  groupConfigs: GroupConfig[];
+  proxyProfiles: ProxyProfile[];
+  validProxyProfileIds?: ReadonlySet<string>;
+}
+
+interface ResolveTerminalSessionHostOptions {
+  session: TerminalSession;
+  hosts: Host[];
+  groupConfigs: GroupConfig[];
+  proxyProfiles: ProxyProfile[];
+  localOs: LocalOs;
+}
+
+interface ResolveTerminalChainHostsOptions {
+  host: Host | null | undefined;
+  hosts: Host[];
+  groupConfigs: GroupConfig[];
+  proxyProfiles: ProxyProfile[];
+  validProxyProfileIds?: ReadonlySet<string>;
+}
+
+const resolveSerialBackspaceBehavior = (
+  serialConfig: Host["serialConfig"],
+): Host["backspaceBehavior"] | null => {
+  if (serialConfig?.backspaceBehavior === "ctrl-h") return "ctrl-h";
+  if (serialConfig?.backspaceBehavior === "default") return undefined;
+  return null;
+};
+
+export function resolveEffectiveTerminalHost({
+  host,
+  groupConfigs,
+  proxyProfiles,
+  validProxyProfileIds = new Set(proxyProfiles.map((profile) => profile.id)),
+}: ResolveEffectiveHostOptions): Host {
+  const groupDefaults = host.group
+    ? resolveGroupDefaults(host.group, groupConfigs, { validProxyProfileIds })
+    : {};
+  return materializeHostProxyProfile(
+    applyGroupDefaults(host, groupDefaults, { validProxyProfileIds }),
+    proxyProfiles,
+  );
+}
+
+const suppressDeviceTypeForShellTransport = (host: Host): Host => {
+  if (!host.moshEnabled && !host.etEnabled) return host;
+  if (host.deviceType === undefined) return host;
+  return { ...host, deviceType: undefined };
+};
+
+function buildFallbackHostFromSession(
+  session: TerminalSession,
+  localOs: LocalOs,
+): Host {
+  const fallbackProtocol = session.protocol ?? "ssh";
+  return {
+    id: session.hostId,
+    label: session.hostLabel || "Local Terminal",
+    hostname: session.hostname || "localhost",
+    username: session.username || (fallbackProtocol === "serial" ? "" : "local"),
+    port: session.port ?? 22,
+    os: fallbackProtocol === "local" ? localOs : "linux",
+    group: "",
+    tags: [],
+    protocol: fallbackProtocol,
+    pluginConnection: sanitizePluginConnection(session.pluginConnection, fallbackProtocol),
+    moshEnabled: session.moshEnabled,
+    etEnabled: session.etEnabled,
+    charset: session.charset,
+    serialConfig: session.serialConfig,
+    backspaceBehavior: session.serialConfig?.backspaceBehavior === "ctrl-h" ? "ctrl-h" : undefined,
+    localShell: session.localShell,
+    localShellArgs: session.localShellArgs,
+    localShellName: session.localShellName,
+    localShellIcon: session.localShellIcon,
+    localStartDir: session.localStartDir,
+  };
+}
+
+export function resolveTerminalSessionHost({
+  session,
+  hosts,
+  groupConfigs,
+  proxyProfiles,
+  localOs,
+}: ResolveTerminalSessionHostOptions): Host {
+  const vaultHost = hosts.find((host) => host.id === session.hostId);
+  if (!vaultHost) return buildFallbackHostFromSession(session, localOs);
+
+  const existingHost = resolveEffectiveTerminalHost({
+    host: vaultHost,
+    groupConfigs,
+    proxyProfiles,
+  });
+
+  const protocol = session.protocol ?? existingHost.protocol;
+  const pluginConnection = sanitizePluginConnection(session.pluginConnection, protocol)
+    ?? sanitizePluginConnection(existingHost.pluginConnection, protocol);
+  const port = session.port ?? existingHost.port;
+  const moshEnabled = session.moshEnabled ?? existingHost.moshEnabled;
+  const etEnabled = session.etEnabled ?? existingHost.etEnabled;
+  const sessionSerialBackspace = resolveSerialBackspaceBehavior(session.serialConfig);
+  const hostSerialBackspace = resolveSerialBackspaceBehavior(existingHost.serialConfig);
+  const backspaceBehavior = protocol === "serial"
+    ? sessionSerialBackspace !== null
+      ? sessionSerialBackspace
+      : hostSerialBackspace !== null
+        ? hostSerialBackspace
+        : existingHost.backspaceBehavior
+    : existingHost.backspaceBehavior;
+
+  if (
+    protocol === existingHost.protocol &&
+    port === existingHost.port &&
+    moshEnabled === existingHost.moshEnabled &&
+    etEnabled === existingHost.etEnabled &&
+    JSON.stringify(pluginConnection) === JSON.stringify(existingHost.pluginConnection) &&
+    backspaceBehavior === existingHost.backspaceBehavior
+  ) {
+    return suppressDeviceTypeForShellTransport(existingHost);
+  }
+
+  return suppressDeviceTypeForShellTransport({
+    ...existingHost,
+    protocol,
+    port,
+    moshEnabled,
+    etEnabled,
+    pluginConnection,
+    backspaceBehavior,
+  });
+}
+
+export function resolveTerminalChainHosts({
+  host,
+  hosts,
+  groupConfigs,
+  proxyProfiles,
+  validProxyProfileIds = new Set(proxyProfiles.map((profile) => profile.id)),
+}: ResolveTerminalChainHostsOptions): Host[] {
+  if (!host?.hostChain?.hostIds?.length) return [];
+  const hostMap = new Map(hosts.map((candidate) => [candidate.id, candidate]));
+  return host.hostChain.hostIds
+    .map((hostId) => {
+      const chainHost = hostMap.get(hostId);
+      if (!chainHost) return undefined;
+      return resolveEffectiveTerminalHost({
+        host: chainHost,
+        groupConfigs,
+        proxyProfiles,
+        validProxyProfileIds,
+      });
+    })
+    .filter((value): value is Host => Boolean(value));
+}

@@ -1,0 +1,95 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: lint-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install shell test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fish xvfb
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Verify generated Catty tool specs
+        run: |
+          npm run generate:capability-tools
+          git diff --exit-code infrastructure/ai/harness/generated/cattyToolSpecs.json
+
+      - name: Verify Codex App Server schema
+        run: npm run check:codex-app-server-schema
+
+      - name: Test
+        run: npm test
+
+      - name: Test terminal background rendering
+        run: xvfb-run -a ./node_modules/.bin/electron --no-sandbox --use-angle=swiftshader --enable-unsafe-swiftshader scripts/terminal-background-rendering.live.test.cjs
+
+      - name: Test terminal keyword highlight performance
+        env:
+          NETCATTY_TERMINAL_PERF_SHOW_WINDOW: "1"
+        # GitHub-hosted runners do not configure Electron's SUID sandbox helper.
+        run: xvfb-run -a ./node_modules/.bin/electron --no-sandbox scripts/xterm-keyword-highlight-performance.live.test.cjs
+
+      - name: Test terminal keyword highlight throughput
+        env:
+          NETCATTY_TERMINAL_PERF_MAIN_REF: ${{ github.event.pull_request.base.sha || 'HEAD^' }}
+          NETCATTY_TERMINAL_PERF_ROUNDS: "3"
+          NETCATTY_TERMINAL_PERF_SHOW_WINDOW: "1"
+        run: xvfb-run -a ./node_modules/.bin/electron --no-sandbox scripts/xterm-keyword-highlight-throughput.live.test.cjs
+
+      - name: Build
+        run: npm run build
+
+  windows-broadcast-ssh:
+    name: windows-broadcast-ssh
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Exercise two SSH password prompts in the desktop app
+        run: node scripts/terminal-broadcast-ssh.live.cjs

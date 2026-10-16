@@ -1,0 +1,25 @@
+{
+  "name": "@netcatty/plugin-contract",
+  "version": "0.1.0-internal",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "files": [
+    "dist",
+    "schema"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./schema/plugin-contract.schema.json": "./schema/plugin-contract.schema.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "ajv": "8.18.0",
+    "ajv-formats": "3.0.1"
+  }
+}

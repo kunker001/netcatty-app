@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' data: blob: ws: wss: https:; img-src 'self' data: https:;" />
+  <title>netcatty SSH</title>
+  <style>
+    /* Load extended Unicode ranges for terminal box drawing characters */
+    @font-face {
+      font-family: 'JetBrains Mono Extended';
+      src: local('JetBrains Mono'), local('JetBrainsMono-Regular');
+      unicode-range: U+2500-257F, U+2580-259F, U+25A0-25FF, U+2700-27BF;
+    }
+
+    :root {
+      --background: 216 33% 96%;
+      --foreground: 222 47% 12%;
+      --card: 0 0% 100%;
+      --card-foreground: 222 47% 12%;
+      --popover: 0 0% 100%;
+      --popover-foreground: 222 47% 12%;
+      --primary: 208 100% 50%;
+      --primary-foreground: 0 0% 100%;
+      --secondary: 220 16% 90%;
+      --secondary-foreground: 222 47% 12%;
+      --muted: 220 16% 90%;
+      --muted-foreground: 220 10% 45%;
+      --accent: var(--primary);
+      --accent-foreground: 222 47% 12%;
+      --destructive: 0 70% 50%;
+      --destructive-foreground: 0 0% 100%;
+      --border: 220 16% 82%;
+      --input: 220 16% 82%;
+      --ring: 208 100% 50%;
+      --radius: 0.65rem;
+      /* Boot default until index.css / Appearance setting update --font-sans.
+         Must stay on the CSS variable so portaled panels inherit the UI font (#2647). */
+      --font-sans: "Mona Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+    }
+
+    .dark {
+      --background: 220 28% 8%;
+      --foreground: 210 40% 95%;
+      --card: 220 22% 12%;
+      --card-foreground: 210 40% 95%;
+      --popover: 220 22% 12%;
+      --popover-foreground: 210 40% 95%;
+      --primary: 200 100% 61%;
+      --primary-foreground: 220 40% 96%;
+      --secondary: 220 16% 16%;
+      --secondary-foreground: 210 40% 90%;
+      --muted: 220 16% 16%;
+      --muted-foreground: 220 10% 70%;
+      --accent: var(--primary);
+      --accent-foreground: 220 40% 96%;
+      --destructive: 0 70% 50%;
+      --destructive-foreground: 210 40% 96%;
+      --border: 220 22% 18%;
+      --input: 220 22% 18%;
+      --ring: 200 100% 61%;
+      --radius: 0.65rem;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      margin: 0;
+      background: hsl(var(--background));
+      color: hsl(var(--foreground));
+    }
+
+    /* Tray panel: keep the host fully clear so CSS rounded corners are see-through. */
+    html.tray-window,
+    html.tray-window body,
+    html.tray-window #root {
+      background: transparent !important;
+      background-color: transparent !important;
+    }
+
+    html.tray-window .splash-screen {
+      display: none !important;
+      background: transparent !important;
+    }
+
+    /* Windows flag/emoji fallbacks live on --font-sans (not a body font-family
+       override) so Appearance UI font still reaches portaled panels (#2647). */
+    html.platform-win32 {
+      --font-sans: "Noto Color Emoji Flags", "Mona Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol";
+    }
+
+    /* Global Modern Scrollbar */
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: hsl(var(--muted-foreground) / 0.3);
+      border-radius: 99px;
+      border: 3px solid transparent;
+      background-clip: content-box;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: hsl(var(--muted-foreground) / 0.5);
+      background-clip: content-box;
+    }
+
+    ::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+
+    /* Utility to hide scrollbar */
+    .scrollbar-hide::-webkit-scrollbar {
+      display: none;
+    }
+
+    .scrollbar-hide {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+
+    /* Splash screen styles */
+    .splash-screen {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      z-index: 9999;
+      transition: opacity 0.2s ease-out;
+    }
+
+    /* Main app only: opaque splash fill. Tray overlay stays clear (#2505). */
+    html:not(.tray-window) .splash-screen {
+      background: hsl(var(--background));
+    }
+
+    .splash-screen.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .splash-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .splash-logo {
+      width: 64px;
+      height: 64px;
+      border-radius: 14px;
+    }
+
+    .splash-spinner {
+      width: 24px;
+      height: 24px;
+      border: 2px solid hsl(var(--muted));
+      border-top-color: hsl(var(--primary));
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+  </style>
+  <script>
+    (function () {
+      try {
+        var theme = localStorage.getItem('netcatty_theme_v1');
+        var accentMode = localStorage.getItem('netcatty_accent_mode_v1');
+        var accentColor = localStorage.getItem('netcatty_color_v1');
+        var lang = localStorage.getItem('netcatty_ui_language_v1');
+        var root = document.documentElement;
+
+        // Resolve 'system' (or absent — default is 'system') via OS preference
+        var resolved = theme;
+        if (!theme || theme === 'system') {
+          resolved = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+        }
+        if (resolved === 'dark' || resolved === 'light') {
+          root.classList.remove('light', 'dark');
+          root.classList.add(resolved);
+        }
+
+        if (accentMode === 'custom' && accentColor) {
+          root.style.setProperty('--primary', accentColor);
+          root.style.setProperty('--accent', accentColor);
+          root.style.setProperty('--ring', accentColor);
+          var parts = accentColor.split(/\s+/);
+          var lightness = parseFloat((parts[2] || '').replace('%', ''));
+          var accentForeground = resolved === 'dark'
+            ? '220 40% 96%'
+            : (!isNaN(lightness) && lightness < 55 ? '0 0% 98%' : '222 47% 12%');
+          root.style.setProperty('--accent-foreground', accentForeground);
+          root.style.setProperty('--primary-foreground', accentForeground);
+        }
+
+        if (lang) root.lang = lang;
+
+        var ua = navigator.userAgent || '';
+        if (/Win/i.test(ua)) {
+          root.classList.add('platform-win32');
+        }
+
+        // Tray overlay uses CSS border-radius over a transparent BrowserWindow.
+        // Mark it before first paint so body/root/splash never flash an opaque
+        // backdrop (#2505). Splash lives in <body>, so remove it on DOM ready.
+        if ((window.location.hash || '') === '#/tray' || (window.location.hash || '').indexOf('#/tray') === 0) {
+          root.classList.add('tray-window');
+          var removeTraySplash = function () {
+            var splash = document.getElementById('splash');
+            if (splash) splash.remove();
+          };
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', removeTraySplash, { once: true });
+          } else {
+            removeTraySplash();
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="/index.css">
+</head>
+
+<body class="bg-background text-foreground overflow-hidden antialiased h-screen w-screen">
+  <div id="root" class="h-full w-full">
+    <!-- Splash screen: shown while React loads, hidden after first paint -->
+    <div id="splash" class="splash-screen">
+      <div class="splash-content">
+        <img class="splash-logo" src="/logo.svg" alt="netcatty" draggable="false" />
+
+        <div class="splash-spinner"></div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+
+</html>

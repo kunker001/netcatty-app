@@ -1,0 +1,2131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://netcatty.com/schemas/plugins/0.1.0-internal/plugin-contract.schema.json",
+  "title": "Netcatty Plugin Contract",
+  "description": "Canonical public contract for Netcatty plugin manifests and host RPC messages.",
+  "$ref": "#/$defs/PluginManifest",
+  "$defs": {
+    "JsonPrimitive": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" }
+      ]
+    },
+    "JsonValue": {
+      "oneOf": [
+        { "$ref": "#/$defs/JsonPrimitive" },
+        { "type": "array", "items": { "$ref": "#/$defs/JsonValue" } },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/JsonValue" }
+        }
+      ]
+    },
+    "JsonValueLimits": {
+      "description": "Host-enforced structural limits for every plugin protocol JSON value.",
+      "const": {
+        "maxDepth": 128,
+        "maxNodes": 100000
+      }
+    },
+    "WireIntegerLimits": {
+      "description": "Host-enforced integer precision limit for JSON protocol fields used in identity, ordering, and correlation.",
+      "const": {
+        "maxSafeInteger": 9007199254740991
+      }
+    },
+    "RpcLimits": {
+      "description": "Host-enforced byte limit for one JSON-RPC control message. Larger payloads must use a stream.",
+      "const": {
+        "maxJsonBytes": 1048576
+      }
+    },
+    "SafeUnsignedInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "SafePositiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "StreamLimits": {
+      "description": "Host-enforced identifier and byte limits for stream frames.",
+      "const": {
+        "maxStreamIdLength": 128,
+        "maxChunkBytes": 16777216,
+        "maxFrameJsonBytes": 25165824,
+        "minWindowBytes": 1024,
+        "maxWindowBytes": 16777216,
+        "maxCreditBytes": 16777216
+      }
+    },
+    "TerminalInterceptorLimits": {
+      "description": "Host-enforced byte and receive-window limits for the privileged direct terminal interceptor MessagePort.",
+      "const": {
+        "maxChunkBytes": 65536,
+        "maxWindowBytes": 262144
+      }
+    },
+    "ImporterLimits": {
+      "description": "Host-enforced byte and record limits for one importer operation.",
+      "const": {
+        "maxInputBytes": 67108864,
+        "maxOutputBytes": 67108864,
+        "maxRecordBytes": 67108864,
+        "maxRecords": 10000
+      }
+    },
+    "SyncLimits": {
+      "description": "Host-enforced byte and identifier limits for one encrypted sync-object operation. inlineObjectBytes is the maximum ciphertext size that may travel inline on the control plane (below the 128 KiB provider JSON budget after base64 expansion).",
+      "const": {
+        "maxObjectBytes": 67108864,
+        "maxObjectKeyLength": 1024,
+        "maxRevisionLength": 256,
+        "inlineObjectBytes": 92160
+      }
+    },
+    "StreamId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "StreamChunkByteLength": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 16777216
+    },
+    "StreamWindowBytes": {
+      "type": "integer",
+      "minimum": 1024,
+      "maximum": 16777216
+    },
+    "StreamCreditBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16777216
+    },
+    "RelativePackagePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*//)(?!.*\\\\)(?!.*[\\u0000-\\u001F<>:\"|?*])(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*\\/(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*[. ](?:/|$))[^/]+(?:/[^/]+)*$"
+    },
+    "PluginId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$"
+    },
+    "ContributionId": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 192,
+      "description": "A globally unique contribution id. Semantic validation requires the exact '<pluginId>.' prefix.",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\\.[A-Za-z][A-Za-z0-9_-]*(?:\\.[A-Za-z][A-Za-z0-9_-]*)*$"
+    },
+    "PluginHostProtocol": {
+      "type": "string",
+      "minLength": 12,
+      "maxLength": 199,
+      "description": "A host protocol owned by a connection Provider contribution: plugin:<providerId>.",
+      "pattern": "^plugin:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\\.[A-Za-z][A-Za-z0-9_-]*(?:\\.[A-Za-z][A-Za-z0-9_-]*)*$"
+    },
+    "FeatureId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9_-]*)+$"
+    },
+    "SecretRef": {
+      "description": "A host-issued reference to secret material. The random identifier is opaque and never sufficient authority on its own. The non-secret key binds permission authorization to the packaged manifest resource; privileged consumers must revalidate identifier ownership, key binding, and operation scope.",
+      "type": "object",
+      "required": ["kind", "id", "key"],
+      "properties": {
+        "kind": { "const": "secret" },
+        "id": { "type": "string", "minLength": 16, "maxLength": 256 },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CredentialRef": {
+      "description": "An opaque host-issued reference to a Netcatty-owned credential. The host validates ownership and provider-operation scope before issuing a plaintext lease.",
+      "type": "object",
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "const": "credential" },
+        "id": { "type": "string", "minLength": 16, "maxLength": 256 }
+      },
+      "additionalProperties": false
+    },
+    "SecretLeaseRef": {
+      "description": "An opaque, operation-bound, single-consumption lease. Only a host capability broker can consume it after revalidating runtime identity and operation scope.",
+      "type": "object",
+      "required": ["kind", "id", "operationId", "expiresAt"],
+      "properties": {
+        "kind": { "const": "secret-lease" },
+        "id": { "type": "string", "minLength": 32, "maxLength": 256 },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "expiresAt": { "$ref": "#/$defs/SafePositiveInteger" }
+      },
+      "additionalProperties": false
+    },
+    "SemanticVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "SemverRange": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "A node-semver compatible range. Official consumers must also run semantic validation.",
+      "pattern": "^(?! *$)[0-9A-Za-z<>=~^*xX|.\\-+ ]+$"
+    },
+    "LocalizedText": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 512 },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$" },
+          "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      ]
+    },
+    "PluginPermission": {
+      "type": "string",
+      "enum": [
+        "storage",
+        "runtime.advanced",
+        "settings.read",
+        "settings.write",
+        "commands",
+        "menus",
+        "views",
+        "clipboard.read",
+        "clipboard.write",
+        "terminal.metadata",
+        "terminal.output",
+        "terminal.input",
+        "terminal.decorate",
+        "terminal.complete",
+        "terminal.intercept.input",
+        "terminal.intercept.output",
+        "vault.metadata",
+        "vault.write",
+        "vault.credentials",
+        "sftp.read",
+        "sftp.write",
+        "network",
+        "filesystem.read",
+        "filesystem.write",
+        "secrets",
+        "companion.execute",
+        "provider.terminal",
+        "provider.connection",
+        "provider.authentication",
+        "provider.sync",
+        "provider.importer"
+      ]
+    },
+    "NonResourceScopedPermission": {
+      "description": "A permission whose complete activation-time scope is represented by the permission name itself.",
+      "type": "string",
+      "enum": [
+        "storage",
+        "runtime.advanced",
+        "settings.read",
+        "settings.write",
+        "commands",
+        "menus",
+        "views",
+        "clipboard.read",
+        "clipboard.write",
+        "terminal.metadata",
+        "terminal.output",
+        "terminal.input",
+        "terminal.decorate",
+        "terminal.complete",
+        "terminal.intercept.input",
+        "terminal.intercept.output",
+        "vault.metadata",
+        "vault.write",
+        "vault.credentials",
+        "sftp.read",
+        "sftp.write",
+        "secrets",
+        "provider.terminal",
+        "provider.connection",
+        "provider.authentication",
+        "provider.sync",
+        "provider.importer"
+      ]
+    },
+    "ResourceScopedPermission": {
+      "description": "A permission whose approval must be constrained to explicit canonical resources.",
+      "type": "string",
+      "enum": [
+        "network",
+        "filesystem.read",
+        "filesystem.write",
+        "companion.execute"
+      ]
+    },
+    "PermissionResource": {
+      "description": "A host-canonicalized permission resource. Filesystem resources may be absolute platform paths; other permission kinds impose narrower runtime limits.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192
+    },
+    "BoundedPermissionResource": {
+      "description": "An explicit resource bound; the all-resources wildcard is not an activation-time bound.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192,
+      "not": { "const": "*" }
+    },
+    "PermissionResourceKind": {
+      "description": "Whether a canonical resource grant covers only that resource or a filesystem directory subtree.",
+      "type": "string",
+      "enum": ["exact", "directory"]
+    },
+    "PermissionResourceDeclaration": {
+      "type": "object",
+      "required": ["permission", "resources"],
+      "properties": {
+        "permission": { "$ref": "#/$defs/PluginPermission" },
+        "resources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/PermissionResource" }
+        },
+        "reason": { "type": "string", "maxLength": 1024 }
+      },
+      "additionalProperties": false
+    },
+    "PermissionDeclaration": {
+      "oneOf": [
+        { "$ref": "#/$defs/PluginPermission" },
+        { "$ref": "#/$defs/PermissionResourceDeclaration" }
+      ]
+    },
+    "RequiredPermissionResourceDeclaration": {
+      "type": "object",
+      "required": ["permission", "resources"],
+      "properties": {
+        "permission": { "$ref": "#/$defs/ResourceScopedPermission" },
+        "resources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/BoundedPermissionResource" }
+        },
+        "reason": { "type": "string", "maxLength": 1024 }
+      },
+      "additionalProperties": false
+    },
+    "RequiredPermissionDeclaration": {
+      "description": "Required resource-scoped permissions must name their complete activation-time approval bounds.",
+      "oneOf": [
+        { "$ref": "#/$defs/NonResourceScopedPermission" },
+        { "$ref": "#/$defs/RequiredPermissionResourceDeclaration" }
+      ]
+    },
+    "PermissionSet": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/RequiredPermissionDeclaration" }
+        },
+        "optional": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/PermissionDeclaration" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginEntrypoints": {
+      "type": "object",
+      "properties": {
+        "browser": { "$ref": "#/$defs/RelativePackagePath" },
+        "node": { "$ref": "#/$defs/RelativePackagePath" }
+      },
+      "minProperties": 1,
+      "additionalProperties": false
+    },
+    "PluginEngines": {
+      "type": "object",
+      "required": ["netcatty", "api"],
+      "properties": {
+        "netcatty": { "$ref": "#/$defs/SemverRange" },
+        "api": { "$ref": "#/$defs/SemverRange" }
+      },
+      "additionalProperties": false
+    },
+    "PluginEngineHeader": {
+      "type": "object",
+      "required": ["netcatty", "api"],
+      "properties": {
+        "netcatty": { "$ref": "#/$defs/SemverRange" },
+        "api": { "$ref": "#/$defs/SemverRange" }
+      },
+      "additionalProperties": true
+    },
+    "PluginFeatures": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/FeatureId" }
+        },
+        "optional": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/FeatureId" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ActivationEvent": {
+      "oneOf": [
+        { "const": "onStartupFinished" },
+        {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^on(?:Command|View|Provider):[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\\.[A-Za-z][A-Za-z0-9_-]*(?:\\.[A-Za-z][A-Za-z0-9_-]*)*$"
+        }
+      ]
+    },
+    "ContextKeyExpression": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "A host-parsed Context Key expression. Plugins must not evaluate this string themselves."
+    },
+    "ThemeIcon": {
+      "type": "object",
+      "required": ["kind", "name"],
+      "properties": {
+        "kind": { "const": "theme" },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9-]*$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PackageIcon": {
+      "type": "object",
+      "required": ["kind", "light"],
+      "properties": {
+        "kind": { "const": "package" },
+        "light": { "$ref": "#/$defs/RelativePackagePath" },
+        "dark": { "$ref": "#/$defs/RelativePackagePath" }
+      },
+      "additionalProperties": false
+    },
+    "IconReference": {
+      "oneOf": [
+        { "$ref": "#/$defs/ThemeIcon" },
+        { "$ref": "#/$defs/PackageIcon" }
+      ]
+    },
+    "SettingScope": {
+      "type": "string",
+      "enum": ["application", "workspace", "host", "session", "device"]
+    },
+    "SettingControl": {
+      "type": "string",
+      "enum": [
+        "switch",
+        "radio",
+        "select",
+        "multiselect",
+        "text",
+        "textarea",
+        "number",
+        "slider",
+        "password",
+        "color",
+        "font",
+        "file",
+        "directory",
+        "keybinding",
+        "list",
+        "table"
+      ]
+    },
+    "SettingOption": {
+      "type": "object",
+      "required": ["value", "label"],
+      "properties": {
+        "value": { "type": "string", "maxLength": 256 },
+        "label": { "$ref": "#/$defs/LocalizedText" },
+        "description": { "$ref": "#/$defs/LocalizedText" }
+      },
+      "additionalProperties": false
+    },
+    "SettingContribution": {
+      "type": "object",
+      "required": ["id", "label", "control", "scope"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ContributionId" },
+        "label": { "$ref": "#/$defs/LocalizedText" },
+        "description": { "$ref": "#/$defs/LocalizedText" },
+        "control": { "$ref": "#/$defs/SettingControl" },
+        "scope": { "$ref": "#/$defs/SettingScope" },
+        "default": { "$ref": "#/$defs/JsonValue" },
+        "secret": { "type": "boolean", "default": false },
+        "required": { "type": "boolean", "default": false },
+        "options": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/SettingOption" }
+        },
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 },
+        "pattern": { "type": "string", "maxLength": 512 },
+        "placeholder": { "$ref": "#/$defs/LocalizedText" },
+        "when": { "$ref": "#/$defs/ContextKeyExpression" },
+        "restartRequired": { "type": "boolean", "default": false },
+        "sync": { "type": "boolean", "default": false },
+        "sortable": { "type": "boolean", "default": false },
+        "valueSchema": { "$ref": "#/$defs/JsonValue" }
+      },
+      "additionalProperties": false
+    },
+    "CommandContribution": {
+      "type": "object",
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ContributionId" },
+        "title": { "$ref": "#/$defs/LocalizedText" },
+        "category": { "$ref": "#/$defs/LocalizedText" },
+        "description": { "$ref": "#/$defs/LocalizedText" },
+        "icon": { "$ref": "#/$defs/IconReference" },
+        "enablement": { "$ref": "#/$defs/ContextKeyExpression" }
+      },
+      "additionalProperties": false
+    },
+    "KeybindingContribution": {
+      "type": "object",
+      "required": ["command", "key"],
+      "properties": {
+        "command": { "$ref": "#/$defs/ContributionId" },
+        "key": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "mac": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "linux": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "windows": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "when": { "$ref": "#/$defs/ContextKeyExpression" },
+        "args": { "$ref": "#/$defs/JsonValue" }
+      },
+      "additionalProperties": false
+    },
+    "MenuLocation": {
+      "type": "string",
+      "enum": [
+        "commandPalette",
+        "application",
+        "host/context",
+        "terminal/context",
+        "terminal/toolbar",
+        "statusBar"
+      ]
+    },
+    "MenuContribution": {
+      "type": "object",
+      "required": ["command", "location"],
+      "properties": {
+        "command": { "$ref": "#/$defs/ContributionId" },
+        "alt": { "$ref": "#/$defs/ContributionId" },
+        "location": { "$ref": "#/$defs/MenuLocation" },
+        "title": { "$ref": "#/$defs/LocalizedText" },
+        "icon": { "$ref": "#/$defs/IconReference" },
+        "group": { "type": "string", "maxLength": 128 },
+        "order": { "type": "number" },
+        "when": { "$ref": "#/$defs/ContextKeyExpression" },
+        "enablement": { "$ref": "#/$defs/ContextKeyExpression" },
+        "checked": { "$ref": "#/$defs/ContextKeyExpression" },
+        "showKeybinding": { "type": "boolean", "default": true }
+      },
+      "additionalProperties": false
+    },
+    "ViewLocation": {
+      "type": "string",
+      "enum": ["aside", "panel", "tab", "modal", "settings"]
+    },
+    "ViewContribution": {
+      "type": "object",
+      "required": ["id", "title", "location", "entry"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ContributionId" },
+        "title": { "$ref": "#/$defs/LocalizedText" },
+        "location": { "$ref": "#/$defs/ViewLocation" },
+        "entry": { "$ref": "#/$defs/RelativePackagePath" },
+        "icon": { "$ref": "#/$defs/IconReference" },
+        "order": { "type": "number" },
+        "when": { "$ref": "#/$defs/ContextKeyExpression" },
+        "retainContextWhenHidden": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
+    },
+    "ProviderKind": {
+      "type": "string",
+      "enum": [
+        "terminal.completion",
+        "terminal.decoration",
+        "terminal.link",
+        "terminal.hover",
+        "terminal.matcher",
+        "terminal.semantic",
+        "terminal.prompt",
+        "terminal.background",
+        "terminal.theme",
+        "terminal.interceptor.input",
+        "terminal.interceptor.output",
+        "connection",
+        "authentication",
+        "sync",
+        "importer"
+      ]
+    },
+    "ProviderContribution": {
+      "type": "object",
+      "required": ["id", "label", "kind"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ContributionId" },
+        "label": { "$ref": "#/$defs/LocalizedText" },
+        "description": { "$ref": "#/$defs/LocalizedText" },
+        "kind": { "$ref": "#/$defs/ProviderKind" },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/FeatureId" }
+        },
+        "configurationSchema": { "$ref": "#/$defs/JsonValue" }
+      },
+      "additionalProperties": false
+    },
+    "ProviderValidationIssue": {
+      "type": "object",
+      "required": ["severity", "message"],
+      "properties": {
+        "path": { "type": "string", "maxLength": 1024 },
+        "severity": { "type": "string", "enum": ["warning", "error"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      },
+      "additionalProperties": false
+    },
+    "ConnectionConfigurationPayload": {
+      "type": "object",
+      "required": ["configuration"],
+      "properties": { "configuration": { "$ref": "#/$defs/JsonValue" } },
+      "additionalProperties": false
+    },
+    "ConnectionValidateResult": {
+      "type": "object",
+      "required": ["valid", "issues"],
+      "properties": {
+        "valid": { "type": "boolean" },
+        "issues": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ProviderValidationIssue" } }
+      },
+      "additionalProperties": false
+    },
+    "ConnectionProbeResult": {
+      "type": "object",
+      "required": ["available"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "message": { "type": "string", "maxLength": 2048 },
+        "capabilities": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": { "$ref": "#/$defs/JsonValue" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConnectionOpenPayload": {
+      "type": "object",
+      "required": ["configuration", "operationId", "columns", "rows", "inputStreamId", "outputStreamId", "windowBytes"],
+      "properties": {
+        "configuration": { "$ref": "#/$defs/JsonValue" },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "columns": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "inputStreamId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "outputStreamId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "windowBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+        "credential": {
+          "oneOf": [
+            { "$ref": "#/$defs/SecretRef" },
+            { "$ref": "#/$defs/CredentialRef" },
+            { "$ref": "#/$defs/SecretLeaseRef" }
+          ]
+        },
+        "authenticationProviderId": { "$ref": "#/$defs/ContributionId" }
+      },
+      "additionalProperties": false
+    },
+    "ConnectionOpenResult": {
+      "type": "object",
+      "required": ["connectionId", "status"],
+      "properties": {
+        "connectionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "status": { "type": "string", "enum": ["connecting", "connected"] },
+        "diagnostics": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ProviderValidationIssue" } }
+      },
+      "additionalProperties": false
+    },
+    "ConnectionControlPayload": {
+      "type": "object",
+      "required": ["connectionId", "operationId"],
+      "properties": {
+        "connectionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "ConnectionResizePayload": {
+      "type": "object",
+      "required": ["connectionId", "operationId", "columns", "rows"],
+      "properties": {
+        "connectionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "columns": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 16384 }
+      },
+      "additionalProperties": false
+    },
+    "ConnectionSignalPayload": {
+      "type": "object",
+      "required": ["connectionId", "operationId", "signal"],
+      "properties": {
+        "connectionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "signal": { "type": "string", "enum": ["interrupt", "terminate", "kill", "eof", "break"] }
+      },
+      "additionalProperties": false
+    },
+    "ConnectionControlResult": {
+      "description": "resize, signal, reconnect, and close are acknowledged by returning JSON null. Any object result is rejected.",
+      "const": null
+    },
+    "ConnectionStatusResult": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string", "enum": ["connecting", "connected", "reconnecting", "closed", "error"] },
+        "message": { "type": "string", "maxLength": 2048 },
+        "retryable": { "type": "boolean" },
+        "diagnostics": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ProviderValidationIssue" } }
+      },
+      "additionalProperties": false
+    },
+    "AuthenticationChallenge": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["id", "kind", "title"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "kind": { "type": "string", "enum": ["text", "password", "otp"] },
+            "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "message": { "type": "string", "maxLength": 2048 },
+            "placeholder": { "type": "string", "maxLength": 512 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["id", "kind", "title", "choices"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "kind": { "const": "choice" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "message": { "type": "string", "maxLength": 2048 },
+            "choices": {
+              "type": "array", "minItems": 1, "maxItems": 64,
+              "items": {
+                "type": "object", "required": ["id", "label"],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                  "label": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "description": { "type": "string", "maxLength": 2048 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "multiple": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["id", "kind", "title"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "kind": { "const": "confirmation" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "message": { "type": "string", "maxLength": 2048 },
+            "confirmLabel": { "type": "string", "maxLength": 128 },
+            "cancelLabel": { "type": "string", "maxLength": 128 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["id", "kind", "title", "url"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "kind": { "const": "browser" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "url": { "type": "string", "format": "uri", "maxLength": 8192 },
+            "callbackUri": { "type": "string", "format": "uri", "maxLength": 8192 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["id", "kind", "title", "verificationUri", "userCode", "expiresAt"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "kind": { "const": "deviceCode" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "verificationUri": { "type": "string", "format": "uri", "maxLength": 8192 },
+            "userCode": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "expiresAt": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "intervalMs": { "type": "integer", "minimum": 100, "maximum": 300000 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AuthenticationBeginPayload": {
+      "type": "object",
+      "required": ["operationId", "connectionProviderId", "configuration"],
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "connectionProviderId": { "$ref": "#/$defs/ContributionId" },
+        "configuration": { "$ref": "#/$defs/JsonValue" },
+        "credential": { "oneOf": [{ "$ref": "#/$defs/SecretRef" }, { "$ref": "#/$defs/CredentialRef" }, { "$ref": "#/$defs/SecretLeaseRef" }] }
+      },
+      "additionalProperties": false
+    },
+    "AuthenticationResponsePayload": {
+      "type": "object",
+      "required": ["operationId", "challengeId", "response"],
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "challengeId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "response": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 8192 },
+            { "type": "boolean" },
+            { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "maxLength": 128 } },
+            { "$ref": "#/$defs/SecretLeaseRef" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AuthenticationResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "challenge"],
+          "properties": {
+            "status": { "const": "challenge" },
+            "challenge": { "$ref": "#/$defs/AuthenticationChallenge" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "const": "authenticated" },
+            "credential": { "oneOf": [{ "$ref": "#/$defs/SecretRef" }, { "$ref": "#/$defs/CredentialRef" }] }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "const": "cancelled" },
+            "message": { "type": "string", "maxLength": 2048 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "const": "failed" },
+            "message": { "type": "string", "maxLength": 2048 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ImporterDetectPayload": {
+      "type": "object",
+      "required": ["sample"],
+      "properties": {
+        "fileName": { "type": "string", "maxLength": 1024 },
+        "mediaType": { "type": "string", "maxLength": 256 },
+        "sample": {
+          "type": "object", "required": ["encoding", "data"],
+          "properties": {
+            "encoding": { "const": "base64" },
+            "data": { "type": "string", "maxLength": 174764 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ImporterDetectResult": {
+      "type": "object",
+      "required": ["confidence"],
+      "properties": {
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "format": { "type": "string", "maxLength": 256 },
+        "reason": { "type": "string", "maxLength": 2048 }
+      },
+      "additionalProperties": false
+    },
+    "ImporterParsePayload": {
+      "type": "object",
+      "required": ["operationId", "inputStreamId", "outputStreamId", "windowBytes"],
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "fileName": { "type": "string", "maxLength": 1024 },
+        "mediaType": { "type": "string", "maxLength": 256 },
+        "inputStreamId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "outputStreamId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "windowBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+        "options": { "$ref": "#/$defs/JsonValue" }
+      },
+      "additionalProperties": false
+    },
+    "ImporterParseResult": {
+      "type": "object",
+      "required": ["parsed", "warnings", "errors"],
+      "properties": {
+        "parsed": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "warnings": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "errors": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      },
+      "additionalProperties": false
+    },
+    "ImporterPluginConnectionDraft": {
+      "type": "object",
+      "required": ["providerId", "configuration"],
+      "properties": {
+        "providerId": { "$ref": "#/$defs/ContributionId" },
+        "configuration": { "$ref": "#/$defs/JsonValue" },
+        "authenticationProviderId": { "$ref": "#/$defs/ContributionId" },
+        "credentialId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Source id of an identity or key draft in the same import. Netcatty maps it to the newly persisted host-owned credential id."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ImporterHostDraft": {
+      "description": "A host draft normalized by Netcatty before Vault persistence. Executable startup commands and plaintext built-in credentials are intentionally not part of this public importer shape.",
+      "type": "object",
+      "anyOf": [
+        {
+          "required": ["hostname"],
+          "properties": {
+            "hostname": { "type": "string", "minLength": 1, "maxLength": 1024 }
+          }
+        },
+        {
+          "required": ["protocol", "pluginConnection"],
+          "properties": {
+            "protocol": { "$ref": "#/$defs/PluginHostProtocol" },
+            "pluginConnection": { "$ref": "#/$defs/ImporterPluginConnectionDraft" }
+          }
+        }
+      ],
+      "if": {
+        "type": "object",
+        "required": ["protocol"],
+        "properties": { "protocol": { "$ref": "#/$defs/PluginHostProtocol" } }
+      },
+      "then": { "required": ["pluginConnection"] },
+      "dependentRequired": {
+        "pluginConnection": ["protocol"]
+      },
+      "dependentSchemas": {
+        "pluginConnection": {
+          "type": "object",
+          "required": ["protocol"],
+          "properties": { "protocol": { "$ref": "#/$defs/PluginHostProtocol" } }
+        }
+      },
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "hostname": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "username": { "type": "string", "maxLength": 512 },
+        "group": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "tags": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "os": { "type": "string", "enum": ["linux", "windows", "macos"] },
+        "deviceType": { "type": "string", "enum": ["general", "network"] },
+        "identityId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "identityFileId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "telnetIdentityId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "protocol": {
+          "oneOf": [
+            { "type": "string", "enum": ["ssh", "telnet", "mosh", "et", "local", "serial"] },
+            { "$ref": "#/$defs/PluginHostProtocol" }
+          ]
+        },
+        "pluginConnection": { "$ref": "#/$defs/ImporterPluginConnectionDraft" },
+        "notes": { "type": "string", "maxLength": 65536 },
+        "theme": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sftpEncoding": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "sftpFileProtocol": { "type": "string", "enum": ["auto", "sftp", "scp"] },
+        "moshEnabled": { "type": "boolean" },
+        "etEnabled": { "type": "boolean" },
+        "telnetEnabled": { "type": "boolean" },
+        "sftpSudo": { "type": "boolean" },
+        "requiresMfa": { "type": "boolean" },
+        "useSshAgent": { "type": "boolean" },
+        "identitiesOnly": { "type": "boolean" },
+        "agentForwarding": { "type": "boolean" },
+        "x11Forwarding": { "type": "boolean" },
+        "showLineTimestamps": { "type": "boolean" },
+        "disableDynamicTabTitle": { "type": "boolean" },
+        "pinned": { "type": "boolean" },
+        "autoOpenSftpPanel": { "type": "boolean" },
+        "sftpFollowTerminalCwd": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "telnetPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "etPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "keepaliveInterval": { "type": "integer", "minimum": 0, "maximum": 3600 },
+        "keepaliveCountMax": { "type": "integer", "minimum": 1, "maximum": 100 }
+      },
+      "additionalProperties": false
+    },
+    "ImporterIdentityDraft": {
+      "type": "object",
+      "required": ["label", "username", "authMethod"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "username": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "authMethod": { "type": "string", "enum": ["password", "key", "certificate"] },
+        "password": { "type": "string", "maxLength": 65536 },
+        "keyId": { "type": "string", "minLength": 1, "maxLength": 256 }
+      },
+      "additionalProperties": false
+    },
+    "ImporterKeyDraft": {
+      "type": "object",
+      "required": ["label", "type"],
+      "oneOf": [
+        {
+          "required": ["privateKey"],
+          "properties": {
+            "privateKey": { "type": "string", "minLength": 1, "maxLength": 2097152 }
+          }
+        },
+        {
+          "required": ["filePath"],
+          "properties": {
+            "filePath": { "type": "string", "minLength": 1, "maxLength": 8192 }
+          }
+        }
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "type": { "type": "string", "enum": ["RSA", "ECDSA", "ED25519"] },
+        "privateKey": { "type": "string", "minLength": 1, "maxLength": 2097152 },
+        "publicKey": { "type": "string", "maxLength": 1048576 },
+        "certificate": { "type": "string", "maxLength": 1048576 },
+        "passphrase": { "type": "string", "maxLength": 65536 },
+        "filePath": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "category": { "type": "string", "enum": ["key", "certificate", "identity"] }
+      },
+      "additionalProperties": false
+    },
+    "ImporterSnippetDraft": {
+      "type": "object",
+      "required": ["label", "command"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "command": { "type": "string", "minLength": 1, "maxLength": 1048576 },
+        "tags": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "kind": { "type": "string", "enum": ["snippet", "script"] },
+        "description": { "type": "string", "maxLength": 4096 }
+      },
+      "additionalProperties": false
+    },
+    "ImporterGroupDraft": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 512 },
+        {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "label": { "type": "string", "minLength": 1, "maxLength": 512 }
+          },
+          "anyOf": [
+            {
+              "required": ["path"],
+              "properties": {
+                "path": { "type": "string", "minLength": 1, "maxLength": 512 }
+              }
+            },
+            {
+              "required": ["label"],
+              "properties": {
+                "label": { "type": "string", "minLength": 1, "maxLength": 512 }
+              }
+            }
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ImporterRecord": {
+      "oneOf": [
+        {
+          "type": "object", "required": ["type", "draft"],
+          "properties": {
+            "type": { "const": "draft" },
+            "draft": {
+              "oneOf": [
+                {
+                  "type": "object", "required": ["kind", "value"],
+                  "properties": {
+                    "kind": { "const": "host" },
+                    "value": { "$ref": "#/$defs/ImporterHostDraft" }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object", "required": ["kind", "value"],
+                  "properties": {
+                    "kind": { "const": "identity" },
+                    "value": { "$ref": "#/$defs/ImporterIdentityDraft" }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object", "required": ["kind", "value"],
+                  "properties": {
+                    "kind": { "const": "key" },
+                    "value": { "$ref": "#/$defs/ImporterKeyDraft" }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object", "required": ["kind", "value"],
+                  "properties": {
+                    "kind": { "const": "snippet" },
+                    "value": { "$ref": "#/$defs/ImporterSnippetDraft" }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object", "required": ["kind", "value"],
+                  "properties": {
+                    "kind": { "const": "group" },
+                    "value": { "$ref": "#/$defs/ImporterGroupDraft" }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object", "required": ["type", "message"],
+          "properties": {
+            "type": { "type": "string", "enum": ["warning", "error"] },
+            "code": { "type": "string", "maxLength": 128 },
+            "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+            "path": { "type": "string", "maxLength": 1024 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object", "required": ["type", "completed"],
+          "properties": {
+            "type": { "const": "progress" },
+            "completed": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "total": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "message": { "type": "string", "maxLength": 2048 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "SyncObjectKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "SyncObjectRevision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "SyncAccount": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "email": { "type": "string", "maxLength": 512 },
+        "name": { "type": "string", "maxLength": 512 },
+        "avatarUrl": { "type": "string", "maxLength": 2048 }
+      },
+      "additionalProperties": false
+    },
+    "SyncConnectPayload": {
+      "type": "object",
+      "required": ["configuration", "operationId"],
+      "properties": {
+        "configuration": { "$ref": "#/$defs/JsonValue" },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "credential": {
+          "oneOf": [
+            { "$ref": "#/$defs/SecretRef" },
+            { "$ref": "#/$defs/CredentialRef" },
+            { "$ref": "#/$defs/SecretLeaseRef" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SyncConnectResult": {
+      "type": "object",
+      "required": ["account"],
+      "properties": {
+        "account": { "$ref": "#/$defs/SyncAccount" }
+      },
+      "additionalProperties": false
+    },
+    "SyncDisconnectPayload": {
+      "type": "object",
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "SyncDisconnectResult": {
+      "type": "null"
+    },
+    "SyncGetAccountPayload": {
+      "type": "object",
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "SyncGetAccountResult": {
+      "type": "object",
+      "required": ["account"],
+      "properties": {
+        "account": {
+          "oneOf": [
+            { "$ref": "#/$defs/SyncAccount" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SyncGetCapabilitiesPayload": {
+      "type": "object",
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "SyncCapabilitiesResult": {
+      "type": "object",
+      "required": ["revisions", "conditionalWrites", "atomicReplacement"],
+      "properties": {
+        "revisions": { "type": "boolean" },
+        "conditionalWrites": { "type": "boolean" },
+        "atomicReplacement": { "type": "boolean" },
+        "maxObjectBytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "maxObjects": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      },
+      "additionalProperties": false
+    },
+    "SyncReadObjectPayload": {
+      "type": "object",
+      "required": ["key", "operationId"],
+      "properties": {
+        "key": { "$ref": "#/$defs/SyncObjectKey" },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "outputStreamId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "windowBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 }
+      },
+      "additionalProperties": false
+    },
+    "SyncReadObjectResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["found"],
+          "properties": {
+            "found": { "const": false }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["found", "byteLength", "encoding", "data"],
+          "properties": {
+            "found": { "const": true },
+            "byteLength": { "type": "integer", "minimum": 0, "maximum": 67108864 },
+            "encoding": { "const": "base64" },
+            "data": { "type": "string", "maxLength": 9007199254740991 },
+            "revision": { "$ref": "#/$defs/SyncObjectRevision" },
+            "contentType": { "type": "string", "maxLength": 256 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["found", "byteLength", "streamed"],
+          "properties": {
+            "found": { "const": true },
+            "byteLength": { "type": "integer", "minimum": 0, "maximum": 67108864 },
+            "streamed": { "const": true },
+            "revision": { "$ref": "#/$defs/SyncObjectRevision" },
+            "contentType": { "type": "string", "maxLength": 256 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SyncWriteObjectPayload": {
+      "type": "object",
+      "required": ["key", "operationId", "byteLength"],
+      "properties": {
+        "key": { "$ref": "#/$defs/SyncObjectKey" },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "byteLength": { "type": "integer", "minimum": 0, "maximum": 67108864 },
+        "expectedRevision": {
+          "oneOf": [
+            { "$ref": "#/$defs/SyncObjectRevision" },
+            { "type": "null" }
+          ]
+        },
+        "encoding": { "const": "base64" },
+        "data": { "type": "string", "maxLength": 9007199254740991 },
+        "inputStreamId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "windowBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 }
+      },
+      "additionalProperties": false
+    },
+    "SyncWriteObjectResult": {
+      "type": "object",
+      "required": ["created"],
+      "properties": {
+        "created": { "type": "boolean" },
+        "revision": { "$ref": "#/$defs/SyncObjectRevision" }
+      },
+      "additionalProperties": false
+    },
+    "SyncDeleteObjectPayload": {
+      "type": "object",
+      "required": ["key", "operationId"],
+      "properties": {
+        "key": { "$ref": "#/$defs/SyncObjectKey" },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "expectedRevision": { "$ref": "#/$defs/SyncObjectRevision" }
+      },
+      "additionalProperties": false
+    },
+    "SyncDeleteObjectResult": {
+      "type": "object",
+      "required": ["deleted"],
+      "properties": {
+        "deleted": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "CompanionPlatform": {
+      "type": "string",
+      "enum": [
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-arm64",
+        "linux-x64",
+        "win32-arm64",
+        "win32-x64"
+      ]
+    },
+    "CompanionExecutableVariant": {
+      "type": "object",
+      "required": ["path", "platforms", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/RelativePackagePath" },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/CompanionPlatform" }
+        },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "CompanionExecutable": {
+      "type": "object",
+      "required": ["id", "variants"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ContributionId" },
+        "variants": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": { "$ref": "#/$defs/CompanionExecutableVariant" }
+        },
+        "permissions": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/PluginPermission" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginContributions": {
+      "type": "object",
+      "properties": {
+        "settings": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/SettingContribution" } },
+        "commands": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/CommandContribution" } },
+        "keybindings": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/KeybindingContribution" } },
+        "menus": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/MenuContribution" } },
+        "views": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/ViewContribution" } },
+        "providers": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ProviderContribution" } }
+      },
+      "additionalProperties": false
+    },
+    "PluginManifestHeader": {
+      "type": "object",
+      "required": ["manifestVersion", "id", "version", "engines"],
+      "properties": {
+        "$schema": { "type": "string", "format": "uri-reference" },
+        "manifestVersion": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "id": { "$ref": "#/$defs/PluginId" },
+        "version": { "$ref": "#/$defs/SemanticVersion" },
+        "engines": { "$ref": "#/$defs/PluginEngineHeader" }
+      },
+      "additionalProperties": true
+    },
+    "PluginManifest": {
+      "type": "object",
+      "required": ["manifestVersion", "id", "name", "version", "publisher", "engines", "main"],
+      "properties": {
+        "$schema": { "type": "string", "format": "uri-reference" },
+        "manifestVersion": { "const": 1 },
+        "id": { "$ref": "#/$defs/PluginId" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "displayName": { "$ref": "#/$defs/LocalizedText" },
+        "description": { "$ref": "#/$defs/LocalizedText" },
+        "version": { "$ref": "#/$defs/SemanticVersion" },
+        "publisher": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "license": { "type": "string", "maxLength": 128 },
+        "homepage": { "type": "string", "format": "uri" },
+        "repository": { "type": "string", "format": "uri" },
+        "engines": { "$ref": "#/$defs/PluginEngines" },
+        "features": { "$ref": "#/$defs/PluginFeatures" },
+        "main": { "$ref": "#/$defs/PluginEntrypoints" },
+        "activationEvents": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/ActivationEvent" }
+        },
+        "permissions": { "$ref": "#/$defs/PermissionSet" },
+        "contributes": { "$ref": "#/$defs/PluginContributions" },
+        "companionExecutables": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/CompanionExecutable" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RpcId": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 128 },
+        { "$ref": "#/$defs/SafeUnsignedInteger" }
+      ]
+    },
+    "NullableRpcId": {
+      "oneOf": [
+        { "$ref": "#/$defs/RpcId" },
+        { "type": "null" }
+      ]
+    },
+    "RpcRequest": {
+      "type": "object",
+      "description": "A generic request. Reserved methods with dedicated schemas are excluded and must validate against their exact contract.",
+      "required": ["jsonrpc", "id", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/RpcId" },
+        "method": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "params": { "$ref": "#/$defs/JsonValue" },
+        "deadlineMs": { "type": "integer", "minimum": 1, "maximum": 300000 },
+        "cancellationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "not": {
+        "required": ["method"],
+        "properties": {
+          "method": { "enum": ["plugin.initialize", "plugin.terminal.interceptor.attach", "$/cancelRequest", "$/progress"] }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RpcNotification": {
+      "type": "object",
+      "description": "A generic notification. Reserved notifications with dedicated schemas are excluded and must validate against their exact contract.",
+      "required": ["jsonrpc", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "params": { "$ref": "#/$defs/JsonValue" }
+      },
+      "not": {
+        "required": ["method"],
+        "properties": {
+          "method": { "enum": ["plugin.initialize", "plugin.terminal.interceptor.attach", "$/cancelRequest", "$/progress"] }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RpcSuccess": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/RpcId" },
+        "result": { "$ref": "#/$defs/JsonValue" }
+      },
+      "additionalProperties": false
+    },
+    "JsonRpcStandardErrorCode": {
+      "type": "integer",
+      "enum": [-32700, -32600, -32601, -32602, -32603]
+    },
+    "PluginWireErrorCode": {
+      "type": "integer",
+      "enum": [-32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009, -32010, -32011, -32012, -32013, -32014, -32015, -32016]
+    },
+    "PluginErrorName": {
+      "type": "string",
+      "enum": [
+        "cancelled",
+        "unknown",
+        "deadline_exceeded",
+        "invalid_argument",
+        "not_found",
+        "already_exists",
+        "permission_denied",
+        "resource_exhausted",
+        "failed_precondition",
+        "aborted",
+        "out_of_range",
+        "unavailable",
+        "unsupported",
+        "internal",
+        "data_loss",
+        "unauthenticated"
+      ]
+    },
+    "PluginErrorData": {
+      "type": "object",
+      "required": ["pluginCode"],
+      "properties": {
+        "pluginCode": { "$ref": "#/$defs/PluginErrorName" },
+        "details": { "$ref": "#/$defs/JsonValue" }
+      },
+      "additionalProperties": false
+    },
+    "RpcErrorCode": {
+      "oneOf": [
+        { "$ref": "#/$defs/JsonRpcStandardErrorCode" },
+        { "$ref": "#/$defs/PluginWireErrorCode" }
+      ]
+    },
+    "RpcErrorObject": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/RpcErrorCode" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "data": { "$ref": "#/$defs/JsonValue" }
+      },
+      "additionalProperties": false
+    },
+    "RpcFailure": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/NullableRpcId" },
+        "error": { "$ref": "#/$defs/RpcErrorObject" }
+      },
+      "additionalProperties": false
+    },
+    "ProgressToken": {
+      "$ref": "#/$defs/RpcId"
+    },
+    "ProgressBegin": {
+      "type": "object",
+      "required": ["kind", "title"],
+      "properties": {
+        "kind": { "const": "begin" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "message": { "type": "string", "maxLength": 1024 },
+        "percentage": { "type": "number", "minimum": 0, "maximum": 100 },
+        "cancellable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "ProgressReport": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "report" },
+        "message": { "type": "string", "maxLength": 1024 },
+        "percentage": { "type": "number", "minimum": 0, "maximum": 100 },
+        "increment": { "type": "number", "minimum": 0, "maximum": 100 }
+      },
+      "not": {
+        "required": ["percentage", "increment"],
+        "properties": {
+          "percentage": true,
+          "increment": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProgressEnd": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "end" },
+        "message": { "type": "string", "maxLength": 1024 }
+      },
+      "additionalProperties": false
+    },
+    "ProgressValue": {
+      "oneOf": [
+        { "$ref": "#/$defs/ProgressBegin" },
+        { "$ref": "#/$defs/ProgressReport" },
+        { "$ref": "#/$defs/ProgressEnd" }
+      ]
+    },
+    "RpcProgressNotification": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "$/progress" },
+        "params": {
+          "type": "object",
+          "required": ["token", "value"],
+          "properties": {
+            "token": { "$ref": "#/$defs/ProgressToken" },
+            "value": { "$ref": "#/$defs/ProgressValue" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "RpcCancel": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "$/cancelRequest" },
+        "params": {
+          "type": "object",
+          "required": ["cancellationId"],
+          "properties": {
+            "cancellationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "StreamChunkData": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["encoding", "value", "byteLength"],
+          "properties": {
+            "encoding": { "const": "json" },
+            "value": { "$ref": "#/$defs/JsonValue" },
+            "byteLength": { "$ref": "#/$defs/StreamChunkByteLength" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["encoding", "value", "byteLength"],
+          "properties": {
+            "encoding": { "const": "base64" },
+            "value": {
+              "type": "string",
+              "maxLength": 22369624,
+              "contentEncoding": "base64"
+            },
+            "byteLength": { "$ref": "#/$defs/StreamChunkByteLength" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["encoding", "byteLength"],
+          "properties": {
+            "encoding": { "const": "transfer" },
+            "byteLength": { "$ref": "#/$defs/StreamChunkByteLength" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "StreamFrame": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["streamId", "sequence", "kind", "windowBytes"],
+          "properties": {
+            "streamId": { "$ref": "#/$defs/StreamId" },
+            "sequence": { "const": 0 },
+            "kind": { "const": "open" },
+            "windowBytes": { "$ref": "#/$defs/StreamWindowBytes" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["streamId", "sequence", "kind", "data"],
+          "properties": {
+            "streamId": { "$ref": "#/$defs/StreamId" },
+            "sequence": { "$ref": "#/$defs/SafePositiveInteger" },
+            "kind": { "const": "chunk" },
+            "data": { "$ref": "#/$defs/StreamChunkData" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["streamId", "sequence", "kind"],
+          "properties": {
+            "streamId": { "$ref": "#/$defs/StreamId" },
+            "sequence": { "$ref": "#/$defs/SafePositiveInteger" },
+            "kind": { "enum": ["end", "cancel"] }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["streamId", "sequence", "kind", "error"],
+          "properties": {
+            "streamId": { "$ref": "#/$defs/StreamId" },
+            "sequence": { "$ref": "#/$defs/SafePositiveInteger" },
+            "kind": { "const": "error" },
+            "error": { "$ref": "#/$defs/RpcErrorObject" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["streamId", "sequence", "kind", "creditBytes"],
+          "properties": {
+            "streamId": { "$ref": "#/$defs/StreamId" },
+            "sequence": { "$ref": "#/$defs/SafeUnsignedInteger" },
+            "kind": { "const": "windowUpdate" },
+            "creditBytes": { "$ref": "#/$defs/StreamCreditBytes" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "TerminalInterceptorDirection": {
+      "type": "string",
+      "enum": ["input", "output"]
+    },
+    "TerminalInterceptorChunkByteLength": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65536
+    },
+    "TerminalInterceptorWindowBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 262144
+    },
+    "TerminalInterceptorCreditBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 262144
+    },
+    "TerminalInterceptorReadyFrame": {
+      "type": "object",
+      "required": ["type", "sessionId", "direction", "windowBytes"],
+      "properties": {
+        "type": { "const": "netcatty:terminal-interceptor:ready" },
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000]+$" },
+        "direction": { "$ref": "#/$defs/TerminalInterceptorDirection" },
+        "windowBytes": { "$ref": "#/$defs/TerminalInterceptorWindowBytes" }
+      },
+      "additionalProperties": false
+    },
+    "TerminalInterceptorChunkFrame": {
+      "type": "object",
+      "required": ["type", "sequence", "direction", "creditBytes", "byteLength"],
+      "properties": {
+        "type": { "const": "netcatty:terminal-interceptor:chunk" },
+        "sequence": { "$ref": "#/$defs/SafePositiveInteger" },
+        "direction": { "$ref": "#/$defs/TerminalInterceptorDirection" },
+        "creditBytes": { "$ref": "#/$defs/TerminalInterceptorCreditBytes" },
+        "byteLength": { "$ref": "#/$defs/TerminalInterceptorChunkByteLength" }
+      },
+      "additionalProperties": false
+    },
+    "TerminalInterceptorOkResultFrame": {
+      "type": "object",
+      "required": ["type", "sequence", "status", "creditBytes", "byteLength"],
+      "properties": {
+        "type": { "const": "netcatty:terminal-interceptor:result" },
+        "sequence": { "$ref": "#/$defs/SafePositiveInteger" },
+        "status": { "const": "ok" },
+        "creditBytes": { "$ref": "#/$defs/TerminalInterceptorChunkByteLength" },
+        "byteLength": { "$ref": "#/$defs/TerminalInterceptorChunkByteLength" }
+      },
+      "additionalProperties": false
+    },
+    "TerminalInterceptorFailedResultFrame": {
+      "type": "object",
+      "required": ["type", "sequence", "status"],
+      "properties": {
+        "type": { "const": "netcatty:terminal-interceptor:result" },
+        "sequence": { "$ref": "#/$defs/SafePositiveInteger" },
+        "status": { "const": "failed" }
+      },
+      "additionalProperties": false
+    },
+    "TerminalInterceptorFrame": {
+      "oneOf": [
+        { "$ref": "#/$defs/TerminalInterceptorReadyFrame" },
+        { "$ref": "#/$defs/TerminalInterceptorChunkFrame" },
+        { "$ref": "#/$defs/TerminalInterceptorOkResultFrame" },
+        { "$ref": "#/$defs/TerminalInterceptorFailedResultFrame" }
+      ]
+    },
+    "RuntimeInitializeParams": {
+      "type": "object",
+      "required": ["netcattyVersion", "apiVersion", "supportedFeatures"],
+      "properties": {
+        "netcattyVersion": { "$ref": "#/$defs/SemanticVersion" },
+        "apiVersion": { "$ref": "#/$defs/SemanticVersion" },
+        "supportedFeatures": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/FeatureId" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeInitializeResult": {
+      "type": "object",
+      "required": ["pluginId", "pluginVersion", "apiVersion", "enabledFeatures"],
+      "properties": {
+        "pluginId": { "$ref": "#/$defs/PluginId" },
+        "pluginVersion": { "$ref": "#/$defs/SemanticVersion" },
+        "apiVersion": { "$ref": "#/$defs/SemanticVersion" },
+        "enabledFeatures": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/FeatureId" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeInitializeRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/RpcId" },
+        "method": { "const": "plugin.initialize" },
+        "params": { "$ref": "#/$defs/RuntimeInitializeParams" },
+        "deadlineMs": { "type": "integer", "minimum": 1, "maximum": 300000 },
+        "cancellationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeInitializeSuccess": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/RpcId" },
+        "result": { "$ref": "#/$defs/RuntimeInitializeResult" }
+      },
+      "additionalProperties": false
+    },
+    "TerminalSessionSnapshot": {
+      "type": "object",
+      "required": ["sessionId", "protocol", "status"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000]+$" },
+        "hostId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000]+$" },
+        "protocol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "status": { "type": "string", "enum": ["connecting", "connected", "disconnected"] },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000]+$" },
+        "shellType": { "type": "string", "enum": ["posix", "fish", "powershell", "cmd", "unknown"] },
+        "cols": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "alternateScreen": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "TerminalInterceptorAttachmentDescriptor": {
+      "type": "object",
+      "required": ["providerId", "direction", "session"],
+      "properties": {
+        "providerId": { "$ref": "#/$defs/ContributionId" },
+        "direction": { "type": "string", "enum": ["input", "output"] },
+        "session": { "$ref": "#/$defs/TerminalSessionSnapshot" }
+      },
+      "additionalProperties": false
+    },
+    "TerminalInterceptorAttachmentParams": {
+      "type": "object",
+      "required": ["descriptor"],
+      "properties": {
+        "descriptor": { "$ref": "#/$defs/TerminalInterceptorAttachmentDescriptor" }
+      },
+      "additionalProperties": false
+    },
+    "TerminalInterceptorAttachmentResult": {
+      "type": "object",
+      "required": ["accepted"],
+      "properties": {
+        "accepted": { "const": true }
+      },
+      "additionalProperties": false
+    },
+    "TerminalInterceptorAttachmentRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/RpcId" },
+        "method": { "const": "plugin.terminal.interceptor.attach" },
+        "params": { "$ref": "#/$defs/TerminalInterceptorAttachmentParams" },
+        "deadlineMs": { "type": "integer", "minimum": 1, "maximum": 300000 },
+        "cancellationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "TerminalInterceptorAttachmentSuccess": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/RpcId" },
+        "result": { "$ref": "#/$defs/TerminalInterceptorAttachmentResult" }
+      },
+      "additionalProperties": false
+    },
+    "RpcMessage": {
+      "description": "A mutually exclusive RPC wire envelope. Reserved inbound methods use their exact schemas. Successful responses require method-specific validation through request correlation.",
+      "oneOf": [
+        { "$ref": "#/$defs/RpcRequest" },
+        { "$ref": "#/$defs/RpcNotification" },
+        { "$ref": "#/$defs/RpcSuccess" },
+        { "$ref": "#/$defs/RpcFailure" },
+        { "$ref": "#/$defs/RpcCancel" },
+        { "$ref": "#/$defs/RpcProgressNotification" },
+        { "$ref": "#/$defs/RuntimeInitializeRequest" },
+        { "$ref": "#/$defs/TerminalInterceptorAttachmentRequest" }
+      ]
+    },
+    "PermissionGrantScope": {
+      "type": "string",
+      "enum": ["once", "session", "application", "always"]
+    },
+    "PermissionRequest": {
+      "type": "object",
+      "required": ["requestId", "pluginId", "permission", "reason"],
+      "properties": {
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "pluginId": { "$ref": "#/$defs/PluginId" },
+        "pluginVersion": { "$ref": "#/$defs/SemanticVersion" },
+        "pluginName": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "publisher": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "runtimeId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+        "runtimeKind": { "type": ["string", "null"], "enum": ["browser", "utility", null] },
+        "permission": { "$ref": "#/$defs/PluginPermission" },
+        "resources": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/PermissionResource" }
+        },
+        "resourceKinds": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/PermissionResourceKind" }
+        },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "allowedScopes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/PermissionGrantScope" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PermissionDecision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["requestId", "decision", "scope"],
+          "properties": {
+            "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "decision": { "const": "allow" },
+            "scope": { "$ref": "#/$defs/PermissionGrantScope" },
+            "resources": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/PermissionResource" }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["requestId", "decision"],
+          "properties": {
+            "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "decision": { "enum": ["deny", "cancel"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ProviderRequest": {
+      "type": "object",
+      "required": ["providerId", "operation", "requestId"],
+      "properties": {
+        "providerId": { "$ref": "#/$defs/ContributionId" },
+        "operation": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "payload": { "$ref": "#/$defs/JsonValue" },
+        "deadlineMs": { "type": "integer", "minimum": 1, "maximum": 300000 },
+        "cancellationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "ProviderResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["requestId", "status", "result"],
+          "properties": {
+            "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "status": { "const": "ok" },
+            "result": { "$ref": "#/$defs/JsonValue" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["requestId", "status"],
+          "properties": {
+            "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "status": { "const": "cancelled" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["requestId", "status", "error"],
+          "properties": {
+            "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "status": { "const": "failed" },
+            "error": { "$ref": "#/$defs/RpcErrorObject" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

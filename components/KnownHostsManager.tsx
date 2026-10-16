@@ -1,0 +1,751 @@
+import {
+  ArrowRight,
+  ChevronDown,
+  FolderOpen,
+  Import,
+  LayoutGrid,
+  List as ListIcon,
+  RefreshCw,
+  Server,
+  Shield,
+  Trash2,
+} from "lucide-react";
+import React, {
+  memo,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import { useI18n } from "../application/i18n/I18nProvider";
+import { useKnownHostsBackend } from "../application/state/useKnownHostsBackend";
+import { useStoredBoolean } from "../application/state/useStoredBoolean";
+import { useStoredViewMode, ViewMode } from "../application/state/useStoredViewMode";
+import { fingerprintFromPublicKey } from "../domain/knownHosts";
+import {
+  DEFAULT_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+  shouldAutoScanSystemKnownHosts,
+} from "../domain/systemKnownHostsAutoImport";
+import { reorderVaultItems, sortByVaultOrder } from "../domain/vaultOrder";
+import {
+  STORAGE_KEY_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+  STORAGE_KEY_VAULT_KNOWN_HOSTS_VIEW_MODE,
+} from "../infrastructure/config/storageKeys";
+import { logger } from "../lib/logger";
+import { cn } from "../lib/utils";
+import { Host, KnownHost } from "../types";
+import { Button } from "./ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "./ui/context-menu";
+import { Dropdown, DropdownContent, DropdownTrigger } from "./ui/dropdown";
+import { ScrollArea } from "./ui/scroll-area";
+import { SortDropdown, SortMode } from "./ui/sort-dropdown";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
+import { toast } from "./ui/toast";
+import {
+  VaultHeaderSearch,
+  VaultPageHeader,
+  vaultHeaderIconButtonClass,
+  vaultHeaderSecondaryButtonClass,
+} from "./vault/VaultPageHeader";
+import { VaultDeleteConfirmDialog } from "./vault/VaultDeleteConfirmDialog";
+import { VaultEntityIcon, vaultPrimaryIconClass } from "./vault/VaultEntityIcon";
+import { useVaultItemReorder } from "./vault/vaultReorderDrag";
+
+interface KnownHostsManagerProps {
+  knownHosts: KnownHost[];
+  hosts: Host[];
+  onSave: (knownHost: KnownHost) => void;
+  onUpdate: (knownHost: KnownHost) => void;
+  onReorder: (knownHosts: KnownHost[]) => void;
+  onDelete: (id: string) => void;
+  onConvertToHost: (knownHost: KnownHost) => void;
+  onImportFromFile: (hosts: KnownHost[]) => void;
+  onRefresh: () => void;
+}
+
+// Parse known_hosts file content - pure function, moved outside component
+const parseKnownHostsFile = (content: string): KnownHost[] => {
+  const lines = content
+    .split("\n")
+    .filter((line) => line.trim() && !line.startsWith("#"));
+  const parsed: KnownHost[] = [];
+
+  for (const line of lines) {
+    try {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+
+      const [hostPattern, keyType, publicKey] = parts;
+
+      let hostname = hostPattern;
+      let port = 22;
+
+      const bracketMatch = hostPattern.match(/^\[([^\]]+)\]:(\d+)$/);
+      if (bracketMatch) {
+        hostname = bracketMatch[1];
+        port = parseInt(bracketMatch[2], 10);
+      } else if (hostPattern.includes(",")) {
+        hostname = hostPattern.split(",")[0];
+      }
+
+      if (hostname.startsWith("|1|")) {
+        hostname = "(hashed)";
+      }
+
+      const fullPublicKey = `${keyType} ${publicKey}`;
+      // Compute the fingerprint up front so the SSH host verifier can match
+      // against this record directly instead of re-deriving on every connect —
+      // the re-derivation path is where the false "fingerprint changed"
+      // warnings in #972 originated.
+      const fingerprint = fingerprintFromPublicKey(fullPublicKey);
+
+      parsed.push({
+        id: `kh-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        hostname,
+        port,
+        keyType,
+        publicKey: fullPublicKey,
+        fingerprint: fingerprint || undefined,
+        discoveredAt: Date.now(),
+      });
+    } catch {
+      logger.warn("Failed to parse known_hosts line:", line);
+    }
+  }
+
+  return parsed;
+};
+
+
+ // Well-known public service hostnames that should not be imported as managed hosts.
+ const PUBLIC_SERVICE_HOSTNAMES = new Set([
+   'github.com',
+   'gitlab.com',
+   'bitbucket.org',
+   'ssh.dev.azure.com',
+   'vs-ssh.visualstudio.com',
+ ]);
+
+ const isPublicServiceHost = (hostname: string): boolean =>
+   PUBLIC_SERVICE_HOSTNAMES.has(hostname);
+// Memoized Grid Item Component
+
+interface HostItemProps {
+  knownHost: KnownHost;
+  converted: boolean;
+  viewMode: ViewMode;
+  reorderProps?: React.HTMLAttributes<HTMLDivElement>;
+  onDelete: (id: string) => void;
+  onConvertToHost: (knownHost: KnownHost) => void;
+}
+
+const knownHostActionButtonClass =
+  "h-8 w-8 shrink-0 opacity-0 transition-opacity group-hover:opacity-100";
+
+const KnownHostItemActions: React.FC<{
+  knownHost: KnownHost;
+  converted: boolean;
+  onDelete: (id: string) => void;
+  onConvertToHost: (knownHost: KnownHost) => void;
+}> = ({ knownHost, converted, onDelete, onConvertToHost }) => {
+  const { t } = useI18n();
+
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      {!converted && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className={knownHostActionButtonClass}
+              onClick={(e) => {
+                e.stopPropagation();
+                onConvertToHost(knownHost);
+              }}
+            >
+              <ArrowRight size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t("action.convertToHost")}</TooltipContent>
+        </Tooltip>
+      )}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn(knownHostActionButtonClass, "text-destructive hover:text-destructive hover:bg-destructive/10")}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(knownHost.id);
+            }}
+          >
+            <Trash2 size={14} />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{t("action.remove")}</TooltipContent>
+      </Tooltip>
+    </div>
+  );
+};
+
+const HostItem = React.memo<HostItemProps>(
+  ({ knownHost, converted, viewMode, reorderProps, onDelete, onConvertToHost }) => {
+    const { t } = useI18n();
+    // Disabled to reduce log noise - uncomment for debugging
+    // console.log('[HostItem] render:', knownHost.hostname);
+    if (viewMode === "grid") {
+      return (
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <div
+              {...reorderProps}
+              className={cn(
+                reorderProps && "vault-drop-indicator-row",
+                "group cursor-pointer soft-card elevate rounded-xl h-[68px] px-3 py-2",
+                converted && "opacity-60",
+                reorderProps?.className,
+              )}
+            >
+              <div className="flex items-center gap-3 h-full">
+                <VaultEntityIcon
+                  className={vaultPrimaryIconClass}
+                  icon={<Server size={18} />}
+                />
+                <div className="flex-1 min-w-0">
+                  <span className="text-sm font-semibold truncate block">
+                    {knownHost.hostname}
+                  </span>
+                </div>
+                <KnownHostItemActions
+                  knownHost={knownHost}
+                  converted={converted}
+                  onDelete={onDelete}
+                  onConvertToHost={onConvertToHost}
+                />
+              </div>
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            {!converted && (
+              <ContextMenuItem onClick={() => onConvertToHost(knownHost)}>
+                <ArrowRight className="mr-2 h-4 w-4" /> {t("action.convertToHost")}
+              </ContextMenuItem>
+            )}
+            <ContextMenuItem
+              className="text-destructive"
+              onClick={() => onDelete(knownHost.id)}
+            >
+              <Trash2 className="mr-2 h-4 w-4" /> {t("action.remove")}
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      );
+    }
+
+    // List view
+    return (
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            {...reorderProps}
+            className={cn(
+              reorderProps && "vault-drop-indicator-row",
+              "group flex items-center gap-3 px-3 py-2 h-14 rounded-lg hover:bg-secondary/60 transition-colors cursor-pointer",
+              converted && "opacity-60",
+              reorderProps?.className,
+            )}
+          >
+            <VaultEntityIcon
+              className={vaultPrimaryIconClass}
+              icon={<Server size={18} />}
+            />
+            <div className="flex-1 min-w-0">
+              <span className="text-sm font-semibold truncate block">
+                {knownHost.hostname}
+              </span>
+            </div>
+            <KnownHostItemActions
+              knownHost={knownHost}
+              converted={converted}
+              onDelete={onDelete}
+              onConvertToHost={onConvertToHost}
+            />
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          {!converted && (
+            <ContextMenuItem onClick={() => onConvertToHost(knownHost)}>
+              <ArrowRight className="mr-2 h-4 w-4" /> {t("action.convertToHost")}
+            </ContextMenuItem>
+          )}
+          <ContextMenuItem
+            className="text-destructive"
+            onClick={() => onDelete(knownHost.id)}
+          >
+            <Trash2 className="mr-2 h-4 w-4" /> {t("action.remove")}
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+    );
+  },
+);
+
+HostItem.displayName = "HostItem";
+
+const KnownHostsManager: React.FC<KnownHostsManagerProps> = ({
+  knownHosts,
+  hosts,
+  onSave: _onSave,
+  onUpdate: _onUpdate,
+  onReorder,
+  onDelete,
+  onConvertToHost,
+  onImportFromFile,
+  onRefresh,
+}) => {
+  const { t } = useI18n();
+  const { readKnownHosts } = useKnownHostsBackend();
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+  const [isScanning, setIsScanning] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useStoredViewMode(
+    STORAGE_KEY_VAULT_KNOWN_HOSTS_VIEW_MODE,
+    "grid",
+  );
+  const [autoImportSystemKnownHosts] = useStoredBoolean(
+    STORAGE_KEY_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+    DEFAULT_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+  );
+  const [sortMode, setSortMode] = useState<SortMode>("manual");
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const hasScannedRef = React.useRef(false);
+  const listRef = React.useRef<HTMLDivElement | null>(null);
+  const RENDER_LIMIT = 100; // Limit rendered items for performance
+
+  // Define handleScanSystem before useEffect that depends on it
+  const handleScanSystem = useCallback(async (silent = false) => {
+    setIsScanning(true);
+    try {
+      const content = await readKnownHosts();
+      if (content === undefined) {
+        if (!silent) toast.error(
+          t("knownHosts.toast.scanUnavailable"),
+          t("vault.nav.knownHosts"),
+        );
+        return;
+      }
+      if (!content) {
+        if (!silent) toast.info(t("knownHosts.toast.scanNoFile"), t("vault.nav.knownHosts"));
+        return;
+      }
+
+      const parsed = parseKnownHostsFile(content);
+      if (parsed.length === 0) {
+        if (!silent) toast.info(
+          t("knownHosts.toast.scanNoEntries"),
+          t("vault.nav.knownHosts"),
+        );
+        return;
+      }
+
+      const existingHostnames = new Set(
+        knownHosts.map((h) => `${h.hostname}:${h.port}`),
+      );
+      const newHosts = parsed.filter(
+        (h) => !existingHostnames.has(`${h.hostname}:${h.port}`) && !isPublicServiceHost(h.hostname),
+      );
+      const publicFiltered = parsed.filter((h) => isPublicServiceHost(h.hostname)).length;
+
+      if (newHosts.length > 0) {
+        onImportFromFile(newHosts);
+        if (!silent) toast.success(
+          t("knownHosts.toast.scanImported", { count: newHosts.length }),
+          t("vault.nav.knownHosts"),
+        );
+      } else {
+        if (!silent) toast.info(t("knownHosts.toast.scanNoNew"), t("vault.nav.knownHosts"));
+      }
+
+      if (!silent && publicFiltered > 0) {
+        toast.info(
+          t("knownHosts.toast.scanFiltered", { count: publicFiltered }),
+          t("vault.nav.knownHosts"),
+        );
+      }
+    } catch (err) {
+      logger.error("Failed to scan system known_hosts:", err);
+      if (!silent) toast.error(
+        err instanceof Error ? err.message : t("knownHosts.toast.scanFailed"),
+        t("vault.nav.knownHosts"),
+      );
+    } finally {
+      onRefresh();
+      setIsScanning(false);
+    }
+  }, [knownHosts, onRefresh, onImportFromFile, readKnownHosts, t]);
+
+  // Auto-scan on first mount when enabled (silent — no toasts for missing known_hosts)
+  useEffect(() => {
+    if (
+      !shouldAutoScanSystemKnownHosts({
+        autoImportEnabled: autoImportSystemKnownHosts,
+        alreadyScanned: hasScannedRef.current,
+      })
+    ) {
+      return;
+    }
+    hasScannedRef.current = true;
+    const timer = setTimeout(() => {
+      handleScanSystem(true);
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [autoImportSystemKnownHosts, handleScanSystem]);
+
+  // Sort and filter hosts with deduplication by hostname
+  const filteredHosts = useMemo(() => {
+    // First, deduplicate by hostname (keep the most recent one)
+    const hostnameMap = new Map<string, KnownHost>();
+    for (const h of knownHosts) {
+      const key = h.hostname;
+      const existing = hostnameMap.get(key);
+      if (!existing || h.discoveredAt > existing.discoveredAt) {
+        hostnameMap.set(key, h);
+      }
+    }
+    let result = Array.from(hostnameMap.values());
+
+    // Filter by search
+    if (deferredSearch.trim()) {
+      const term = deferredSearch.toLowerCase();
+      result = result.filter(
+        (h) =>
+          h.hostname.toLowerCase().includes(term) ||
+          h.keyType.toLowerCase().includes(term),
+      );
+    }
+
+    // Sort
+    result = [...result].sort((a, b) => {
+      switch (sortMode) {
+        case "az":
+          return a.hostname.localeCompare(b.hostname);
+        case "za":
+          return b.hostname.localeCompare(a.hostname);
+        case "newest":
+          return b.discoveredAt - a.discoveredAt;
+        case "oldest":
+          return a.discoveredAt - b.discoveredAt;
+        case "manual":
+          return 0;
+        default:
+          return 0;
+      }
+    });
+
+    return sortMode === "manual" ? sortByVaultOrder(result) : result;
+  }, [knownHosts, deferredSearch, sortMode]);
+
+  // Limit rendered items for performance
+  const displayedHosts = useMemo(() => {
+    return filteredHosts.slice(0, RENDER_LIMIT);
+  }, [filteredHosts]);
+
+  const hasMore = filteredHosts.length > RENDER_LIMIT;
+
+  const handleFileSelect = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const content = event.target?.result as string;
+        const parsed = parseKnownHostsFile(content);
+
+        // Filter out already existing hosts and directly import
+        const existingHostnames = new Set(
+          knownHosts.map((h) => `${h.hostname}:${h.port}`),
+        );
+        const newHosts = parsed.filter(
+          (h) => !existingHostnames.has(`${h.hostname}:${h.port}`) && !isPublicServiceHost(h.hostname),
+        );
+
+        if (newHosts.length > 0) {
+          onImportFromFile(newHosts);
+        }
+      };
+      reader.readAsText(file);
+
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    },
+    [knownHosts, onImportFromFile],
+  );
+
+  // Memoize host lookup for performance
+  const hostIdSet = useMemo(() => new Set(hosts.map((h) => h.id)), [hosts]);
+
+  // Pre-compute converted status for all known hosts
+  const convertedMap = useMemo(() => {
+    const map = new Map<string, boolean>();
+    for (const kh of knownHosts) {
+      if (kh.convertedToHostId) {
+        map.set(kh.id, hostIdSet.has(kh.convertedToHostId));
+      } else {
+        map.set(kh.id, false);
+      }
+    }
+    return map;
+  }, [knownHosts, hostIdSet]);
+
+  // Memoized handlers to prevent re-renders
+  const handleDelete = useCallback(
+    (id: string) => {
+      setDeleteTargetId(id);
+    },
+    [],
+  );
+
+  const deleteTarget = useMemo(
+    () => knownHosts.find((knownHost) => knownHost.id === deleteTargetId) ?? null,
+    [deleteTargetId, knownHosts],
+  );
+
+  const confirmDelete = useCallback(
+    () => {
+      if (!deleteTargetId) return;
+      onDelete(deleteTargetId);
+      setDeleteTargetId(null);
+    },
+    [deleteTargetId, onDelete],
+  );
+
+  const handleConvertToHost = useCallback(
+    (knownHost: KnownHost) => {
+      onConvertToHost(knownHost);
+    },
+    [onConvertToHost],
+  );
+
+  const openFilePicker = useCallback(() => fileInputRef.current?.click(), []);
+
+  const knownHostReorder = useVaultItemReorder({
+    containerRef: listRef,
+    viewMode,
+    dragType: "known-host-id",
+    targetAttribute: "data-known-host-id",
+    disabled: deferredSearch.trim().length > 0,
+    onReorder: (sourceId, targetId, position) => {
+      onReorder(reorderVaultItems(knownHosts, sourceId, targetId, position));
+      setSortMode("manual");
+    },
+  });
+
+  // Memoize the rendered list to prevent re-renders
+  const renderedItems = useMemo(() => {
+    return displayedHosts.map((knownHost) => (
+      <HostItem
+        key={knownHost.id}
+        knownHost={knownHost}
+        converted={convertedMap.get(knownHost.id) || false}
+        viewMode={viewMode}
+        reorderProps={knownHostReorder.getItemReorderProps(knownHost.id, `known:${knownHost.id}`)}
+        onDelete={handleDelete}
+        onConvertToHost={handleConvertToHost}
+      />
+    ));
+  }, [
+    displayedHosts,
+    convertedMap,
+    viewMode,
+    handleDelete,
+    handleConvertToHost,
+    knownHostReorder,
+  ]);
+
+  return (
+    <div className="h-full flex flex-col">
+      <VaultPageHeader>
+        <div className="flex-1 min-w-0 flex items-center gap-2">
+          <VaultHeaderSearch
+            placeholder={t("knownHosts.search.placeholder")}
+            className="flex-1 max-w-xs"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <div className="flex items-center gap-1">
+          {/* View Mode Toggle */}
+          <Dropdown>
+            <DropdownTrigger asChild>
+              <Button variant="ghost" size="icon" className={vaultHeaderIconButtonClass}>
+                {viewMode === "grid" ? (
+                  <LayoutGrid size={16} />
+                ) : (
+                  <ListIcon size={16} />
+                )}
+                <ChevronDown size={10} className="ml-0.5" />
+              </Button>
+            </DropdownTrigger>
+            <DropdownContent className="w-32" align="end">
+              <Button
+                variant={viewMode === "grid" ? "secondary" : "ghost"}
+                className="w-full justify-start gap-2 h-9"
+                onClick={() => setViewMode("grid")}
+              >
+                <LayoutGrid size={14} /> {t("vault.view.grid")}
+              </Button>
+              <Button
+                variant={viewMode === "list" ? "secondary" : "ghost"}
+                className="w-full justify-start gap-2 h-9"
+                onClick={() => setViewMode("list")}
+              >
+                <ListIcon size={14} /> {t("vault.view.list")}
+              </Button>
+            </DropdownContent>
+          </Dropdown>
+
+          {/* Sort Toggle */}
+          <SortDropdown
+            value={sortMode}
+            onChange={setSortMode}
+            modes={["manual", "az", "za", "newest", "oldest"]}
+            className={vaultHeaderIconButtonClass}
+          />
+        </div>
+        <div className="w-px h-5 bg-border/50" />
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            className={vaultHeaderSecondaryButtonClass}
+            onClick={() => handleScanSystem()}
+            disabled={isScanning}
+          >
+            <RefreshCw
+              size={14}
+              className={cn("mr-2", isScanning && "animate-spin")}
+            />
+            {t("knownHosts.action.scanSystem")}
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,known_hosts"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
+          <Button
+            variant="secondary"
+            className={vaultHeaderSecondaryButtonClass}
+            onClick={openFilePicker}
+          >
+            <Import size={14} className="mr-2" />
+            {t("knownHosts.action.importFile")}
+          </Button>
+        </div>
+      </VaultPageHeader>
+
+      {/* Content */}
+      <ScrollArea className="flex-1">
+        <div
+          ref={listRef}
+          className={cn(
+            "p-4",
+            viewMode === "grid"
+              ? "grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3"
+              : "flex flex-col gap-0",
+          )}
+          onDragOverCapture={knownHostReorder.handleDragOverCapture}
+          onDragOver={knownHostReorder.handleDragOver}
+          onDropCapture={knownHostReorder.handleDropCapture}
+          onDragEndCapture={knownHostReorder.handleDragEndCapture}
+        >
+          {displayedHosts.length === 0 ? (
+            <div
+              className={cn(
+                "flex flex-col items-center justify-center py-16 text-muted-foreground",
+                viewMode === "grid" && "col-span-full",
+              )}
+            >
+              <div className="h-16 w-16 rounded-2xl bg-secondary/80 flex items-center justify-center mb-4">
+                <Shield size={32} className="opacity-60" />
+              </div>
+              <h3 className="text-lg font-semibold text-foreground mb-2">
+                {t("knownHosts.empty.title")}
+              </h3>
+              <p className="text-sm text-center max-w-sm mb-4">
+                {t("knownHosts.empty.desc")}
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  onClick={() => handleScanSystem()}
+                  disabled={isScanning}
+                >
+                  <RefreshCw
+                    size={14}
+                    className={cn("mr-2", isScanning && "animate-spin")}
+                  />
+                  {t("knownHosts.action.scanSystem")}
+                </Button>
+                <Button variant="outline" onClick={openFilePicker}>
+                  <FolderOpen size={14} className="mr-2" />
+                  {t("knownHosts.action.browseFile")}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {renderedItems}
+              {hasMore && (
+                <div
+                  className={cn(
+                    "text-center py-4 text-sm text-muted-foreground",
+                    viewMode === "grid" && "col-span-full",
+                  )}
+                >
+                  {t("knownHosts.results.showingLimited", {
+                    shown: displayedHosts.length,
+                    total: filteredHosts.length,
+                  })}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </ScrollArea>
+      <VaultDeleteConfirmDialog
+        open={Boolean(deleteTargetId)}
+        title={t("vault.deleteConfirm.title", {
+          name: deleteTarget?.hostname ?? "",
+        })}
+        description={t("vault.deleteConfirm.desc")}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTargetId(null);
+        }}
+        onConfirm={confirmDelete}
+      />
+    </div>
+  );
+};
+
+// Custom comparison - only compare data props, not callbacks
+const knownHostsManagerAreEqual = (
+  prev: KnownHostsManagerProps,
+  next: KnownHostsManagerProps,
+): boolean => {
+  return prev.knownHosts === next.knownHosts && prev.hosts === next.hosts;
+};
+
+export default memo(KnownHostsManager, knownHostsManagerAreEqual);

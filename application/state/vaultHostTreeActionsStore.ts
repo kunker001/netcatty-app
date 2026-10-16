@@ -1,0 +1,54 @@
+import { useSyncExternalStore } from 'react';
+
+import type { Host } from '../../types';
+import type { VaultOrderPosition } from '../../domain/vaultOrder';
+
+export interface VaultHostTreeActions {
+  onDeleteHost: (host: Host) => void;
+  onDuplicateHost: (host: Host) => void;
+  onCopyHostname?: (host: Host) => void;
+  onCopyCredentials: (host: Host) => void;
+  onRenameHost: (host: Host) => void;
+  onNewGroup: (parentPath?: string) => void;
+  onRenameGroup: (groupPath: string) => void;
+  onDeleteGroup: (groupPath: string) => void;
+  commitInlineGroupRename: (name: string) => boolean | void | Promise<boolean | void>;
+  cancelInlineGroupEdit: () => void;
+  commitInlineHostRename: (name: string) => void;
+  cancelInlineHostEdit: () => void;
+  moveHostToGroup: (hostId: string, groupPath: string | null) => void;
+  moveGroup: (sourcePath: string, targetParent: string | null) => void;
+  reorderHost: (sourceHostId: string, targetHostId: string, position: VaultOrderPosition) => void;
+  reorderGroup: (sourcePath: string, targetPath: string, position: VaultOrderPosition) => boolean;
+  managedGroupPaths?: Set<string>;
+  onUnmanageGroup?: (groupPath: string) => void;
+}
+
+type Listener = () => void;
+
+class VaultHostTreeActionsStore {
+  private actions: VaultHostTreeActions | null = null;
+  private listeners = new Set<Listener>();
+
+  getActions = () => this.actions;
+
+  setActions = (actions: VaultHostTreeActions | null) => {
+    this.actions = actions;
+    this.listeners.forEach((listener) => listener());
+  };
+
+  subscribe = (listener: Listener) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+}
+
+export const vaultHostTreeActionsStore = new VaultHostTreeActionsStore();
+
+export const useVaultHostTreeActions = () => {
+  return useSyncExternalStore(
+    vaultHostTreeActionsStore.subscribe,
+    vaultHostTreeActionsStore.getActions,
+    vaultHostTreeActionsStore.getActions,
+  );
+};

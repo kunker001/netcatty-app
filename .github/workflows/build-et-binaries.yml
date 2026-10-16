@@ -1,0 +1,332 @@
+name: build-et-binaries
+
+# Trigger philosophy (mirrors build-mosh-binaries.yml):
+#  - Pull requests that touch the et build pipeline run the matrix. Main pushes
+#    provide the post-merge check without duplicating every PR commit.
+#    Artifacts upload as workflow artifacts only; *no* release.
+#  - Manual `workflow_dispatch` with `release_tag` publishes the binaries +
+#    SHA256SUMS to the dedicated binary repository
+#    (`binaricat/Netcatty-et-bin` by default).
+#
+# `paths` keeps unrelated commits (UI, bridges, etc) from rebuilding the et
+# binaries on every push.
+on:
+  workflow_dispatch:
+    inputs:
+      et_ref:
+        description: "EternalTerminal git ref (tag/branch/commit) — see https://github.com/MisterTea/EternalTerminal"
+        type: string
+        default: "et-v6.2.10"
+      release_tag:
+        description: "Optional release tag to attach binaries to (e.g. et-bin-6.2.10-1). Empty = artifacts only."
+        type: string
+        default: ""
+      release_repo:
+        description: "Repository that stores et binary releases."
+        type: string
+        default: "binaricat/Netcatty-et-bin"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-et-binaries.yml"
+      - "electron-builder.config.cjs"
+      - "package.json"
+      - "scripts/build-et/**"
+      - "scripts/fetch-et-binaries.cjs"
+      - "scripts/et-extra-resources.cjs"
+  pull_request:
+    paths:
+      - ".github/workflows/build-et-binaries.yml"
+      - "electron-builder.config.cjs"
+      - "package.json"
+      - "scripts/build-et/**"
+      - "scripts/fetch-et-binaries.cjs"
+      - "scripts/et-extra-resources.cjs"
+
+concurrency:
+  group: build-et-binaries-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ET_REF: ${{ inputs.et_ref || 'et-v6.2.10' }}
+
+jobs:
+  # ------------------------------------------------------------------
+  # Linux x64 (manylinux2014 / glibc 2.17, broad distro compatibility).
+  # ------------------------------------------------------------------
+  build-linux-x64:
+    name: build-linux-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore cached PR build
+        id: et-build-cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache@v6
+        with:
+          path: out/
+          key: et-pr-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.ET_REF }}-${{ hashFiles('.github/workflows/build-et-binaries.yml', 'scripts/build-et/**') }}
+      - name: Restore vcpkg download cache
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
+        with:
+          path: .cache/vcpkg-downloads
+          key: vcpkg-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-et/**') }}
+          restore-keys: vcpkg-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Pull build container with retry
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          image="quay.io/pypa/manylinux2014_x86_64"
+          for attempt in 1 2 3; do
+            if docker pull "$image"; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep "$((attempt * 5))"
+            fi
+          done
+          exit 1
+      - name: Build et (linux-x64)
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/.cache/vcpkg-downloads"
+          docker run --rm --pull=never \
+            -e ET_REF="${ET_REF}" \
+            -e OUT_DIR=/work/out \
+            -e ARCH=x64 \
+            -e VCPKG_DOWNLOADS=/work/.cache/vcpkg-downloads \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash scripts/build-et/build-linux.sh
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: et-linux-x64
+          path: out/
+          if-no-files-found: error
+
+  build-linux-arm64:
+    name: build-linux-arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore cached PR build
+        id: et-build-cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache@v6
+        with:
+          path: out/
+          key: et-pr-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.ET_REF }}-${{ hashFiles('.github/workflows/build-et-binaries.yml', 'scripts/build-et/**') }}
+      - name: Restore vcpkg download cache
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
+        with:
+          path: .cache/vcpkg-downloads
+          key: vcpkg-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-et/**') }}
+          restore-keys: vcpkg-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Pull build container with retry
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          image="quay.io/pypa/manylinux2014_aarch64"
+          for attempt in 1 2 3; do
+            if docker pull "$image"; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep "$((attempt * 5))"
+            fi
+          done
+          exit 1
+      - name: Build et (linux-arm64)
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/.cache/vcpkg-downloads"
+          docker run --rm --pull=never \
+            -e ET_REF="${ET_REF}" \
+            -e OUT_DIR=/work/out \
+            -e ARCH=arm64 \
+            -e VCPKG_DOWNLOADS=/work/.cache/vcpkg-downloads \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            quay.io/pypa/manylinux2014_aarch64 \
+            bash scripts/build-et/build-linux.sh
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: et-linux-arm64
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # macOS universal2 (arm64 + x86_64 lipo). Min deployment target macOS 11.
+  # ------------------------------------------------------------------
+  build-macos-universal:
+    name: build-macos-universal
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore cached PR build
+        id: et-build-cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache@v6
+        with:
+          path: out/
+          key: et-pr-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.ET_REF }}-${{ hashFiles('.github/workflows/build-et-binaries.yml', 'scripts/build-et/**') }}
+      - name: Restore vcpkg download cache
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/vcpkg-downloads
+          key: vcpkg-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-et/**') }}
+          restore-keys: vcpkg-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Prepare vcpkg download cache
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${RUNNER_TEMP}/vcpkg-downloads"
+          echo "VCPKG_DOWNLOADS=${RUNNER_TEMP}/vcpkg-downloads" >> "$GITHUB_ENV"
+      - name: Build et (darwin-universal)
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        env:
+          ET_REF: ${{ env.ET_REF }}
+          OUT_DIR: ${{ github.workspace }}/out
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: bash scripts/build-et/build-macos.sh
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: et-darwin-universal
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Windows x64 — static MSVC build (no DLL bundle).
+  # ------------------------------------------------------------------
+  build-windows-x64:
+    name: build-windows-x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore cached PR build
+        id: et-build-cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache@v6
+        with:
+          path: out/
+          key: et-pr-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.ET_REF }}-${{ hashFiles('.github/workflows/build-et-binaries.yml', 'scripts/build-et/**') }}
+      - name: Restore vcpkg download cache
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\vcpkg-downloads
+          key: vcpkg-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-et/**') }}
+          restore-keys: vcpkg-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Prepare vcpkg download cache
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $downloads = Join-Path $env:RUNNER_TEMP "vcpkg-downloads"
+          New-Item -ItemType Directory -Force -Path $downloads | Out-Null
+          "VCPKG_DOWNLOADS=$downloads" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install ninja
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        run: choco install -y ninja
+      - name: Set up MSVC developer command prompt
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build et (win32-x64)
+        if: github.event_name != 'pull_request' || steps.et-build-cache.outputs.cache-hit != 'true'
+        env:
+          ET_REF: ${{ env.ET_REF }}
+          OUT_DIR: ${{ github.workspace }}\out
+        shell: pwsh
+        run: pwsh -File scripts/build-et/build-windows.ps1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: et-win32-x64
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Windows arm64 — intentionally not built until a tested client exists.
+  # ------------------------------------------------------------------
+
+  # ------------------------------------------------------------------
+  # Aggregate + optional release to the dedicated binary repository.
+  # ------------------------------------------------------------------
+  release:
+    name: release
+    needs:
+      - build-linux-x64
+      - build-linux-arm64
+      - build-macos-universal
+      - build-windows-x64
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - name: Stage release files
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for d in artifacts/*/; do
+            find "$d" -maxdepth 1 -type f -exec cp {} release/ \;
+          done
+          (cd release && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum > SHA256SUMS)
+          ls -la release
+          cat release/SHA256SUMS
+      - name: Determine tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          tag="${RELEASE_TAG}"
+          if [[ ! "$tag" =~ ^et-bin-[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid et binary release tag: $tag" >&2
+            exit 1
+          fi
+          printf 'name=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+      - name: Create / update release
+        env:
+          GH_TOKEN: ${{ secrets.ET_BIN_RELEASE_TOKEN }}
+          RELEASE_REPO: ${{ inputs.release_repo }}
+          RELEASE_TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::ET_BIN_RELEASE_TOKEN is required to publish into ${RELEASE_REPO}."
+            exit 1
+          fi
+          {
+            printf '%s\n' 'Pre-built EternalTerminal `et` client binaries consumed by `scripts/fetch-et-binaries.cjs` during `npm run pack`.'
+            printf 'Built from `MisterTea/EternalTerminal` upstream ref `%s`.\n\n' "${ET_REF}"
+            printf 'Source workflow: %s/%s/actions/runs/%s\n' "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            printf 'Source commit: `%s`\n\n' "${GITHUB_SHA}"
+            printf '%s\n' 'All artifacts are Apache-2.0; see `resources/et/README.md` for source provenance.'
+          } > release-notes.md
+          if gh release view "${RELEASE_TAG}" --repo "${RELEASE_REPO}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${RELEASE_REPO}" \
+              --title "${RELEASE_TAG}" \
+              --notes-file release-notes.md
+            gh release upload "${RELEASE_TAG}" release/* \
+              --repo "${RELEASE_REPO}" \
+              --clobber
+          else
+            gh release create "${RELEASE_TAG}" release/* \
+              --repo "${RELEASE_REPO}" \
+              --title "${RELEASE_TAG}" \
+              --notes-file release-notes.md
+          fi

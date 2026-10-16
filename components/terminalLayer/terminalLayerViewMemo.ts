@@ -1,0 +1,497 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+import { sftpPickerSessionsEqual } from '../../domain/sftpConnectedHosts';
+
+type Ctx = Record<string, any>;
+
+function eq(prev: Ctx, next: Ctx, key: string): boolean {
+  return prev[key] === next[key];
+}
+
+function rectEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+}
+
+function rectRecordEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (!rectEqual(a[key], b[key])) return false;
+  }
+  return true;
+}
+
+function workspaceRectsByIdEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!(a instanceof Map) || !(b instanceof Map)) return false;
+  if (a.size !== b.size) return false;
+  for (const [workspaceId, rects] of a) {
+    if (!rectRecordEqual(rects, b.get(workspaceId))) return false;
+  }
+  return true;
+}
+
+function resizerHandleEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.id === b.id
+    && a.splitId === b.splitId
+    && a.index === b.index
+    && a.direction === b.direction
+    && rectEqual(a.rect, b.rect)
+    && rectEqual(a.splitArea, b.splitArea);
+}
+
+function resizerHandlesEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (!resizerHandleEqual(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+function arrayEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function workspaceNodeEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.id !== b.id || a.type !== b.type) return false;
+  if (a.type === 'pane') {
+    return a.sessionId === b.sessionId;
+  }
+  if (a.direction !== b.direction) return false;
+  if (!arrayEqual(a.sizes, b.sizes)) return false;
+  if (!Array.isArray(a.children) || !Array.isArray(b.children)) return false;
+  if (a.children.length !== b.children.length) return false;
+  for (let i = 0; i < a.children.length; i += 1) {
+    if (!workspaceNodeEqual(a.children[i], b.children[i])) return false;
+  }
+  return true;
+}
+
+function activeWorkspaceEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.id === b.id
+    && a.title === b.title
+    && a.viewMode === b.viewMode
+    && a.focusedSessionId === b.focusedSessionId
+    && a.snippetId === b.snippetId
+    && arrayEqual(a.focusSessionOrder, b.focusSessionOrder)
+    && workspaceNodeEqual(a.root, b.root);
+}
+
+function terminalThemeEqual(prev: Ctx, next: Ctx, key: string): boolean {
+  if (key !== 'terminalTheme') return prev[key] === next[key];
+  const a = prev.terminalTheme;
+  const b = next.terminalTheme;
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.id === b.id
+    && a.colors.background === b.colors.background
+    && a.colors.foreground === b.colors.foreground
+    && a.colors.cursor === b.colors.cursor;
+}
+
+function workspaceCtxKeyEqual(prev: Ctx, next: Ctx, key: string): boolean {
+  if (key === 'computeSplitHint' || key === 'handleWorkspaceDrop') {
+    if (!prev.draggingSessionId && !next.draggingSessionId) return true;
+  }
+  if (key === 'activeWorkspace') {
+    return activeWorkspaceEqual(prev.activeWorkspace, next.activeWorkspace);
+  }
+  if (key === 'workspaceRectsById') {
+    return workspaceRectsByIdEqual(prev.workspaceRectsById, next.workspaceRectsById);
+  }
+  if (key === 'activeResizers') {
+    return resizerHandlesEqual(prev.activeResizers, next.activeResizers);
+  }
+  if (key === 'terminalTheme') {
+    return terminalThemeEqual(prev, next, key);
+  }
+  return prev[key] === next[key];
+}
+
+function scriptRunsEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const prevRun = a[i];
+    const nextRun = b[i];
+    if (prevRun === nextRun) continue;
+    if (!prevRun || !nextRun) return false;
+    if (
+      prevRun.runId !== nextRun.runId
+      || prevRun.status !== nextRun.status
+      || prevRun.stepIndex !== nextRun.stepIndex
+      || prevRun.waitingFor !== nextRun.waitingFor
+      || prevRun.error !== nextRun.error
+      || prevRun.logs?.length !== nextRun.logs?.length
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sidePanelCtxKeyEqual(prev: Ctx, next: Ctx, key: string): boolean {
+  if (key === 'scriptRuns') {
+    return scriptRunsEqual(prev.scriptRuns, next.scriptRuns);
+  }
+  if (key === 'activeWorkspace') {
+    return activeWorkspaceEqual(prev.activeWorkspace, next.activeWorkspace);
+  }
+  if (key === 'terminalTheme') {
+    return terminalThemeEqual(prev, next, key);
+  }
+  if (key === 'sessions') {
+    // Connected picker and retained system panels need transport and tab ownership,
+    // while title/cwd churn can still be ignored.
+    if (prev.sessions === next.sessions) return true;
+    if (!sftpPickerSessionsEqual(prev.sessions, next.sessions)) return false;
+    if (!Array.isArray(prev.sessions) || !Array.isArray(next.sessions)) return false;
+    return prev.sessions.every((session: any, index: number) => (
+      session.workspaceId === next.sessions[index]?.workspaceId
+    ));
+  }
+  if (key === 'workspaceById') {
+    // Focus-only workspace map identity changes must not invalidate every mounted
+    // side-panel slot; System reads focused session from sidePanelLiveStore.
+    return sidePanelWorkspaceByIdEqual(prev.workspaceById, next.workspaceById);
+  }
+  return prev[key] === next[key];
+}
+
+function sidePanelWorkspaceByIdEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (!(a instanceof Map) || !(b instanceof Map)) return false;
+  if (a.size !== b.size) return false;
+  for (const [workspaceId, prevWorkspace] of a) {
+    const nextWorkspace = b.get(workspaceId);
+    if (!nextWorkspace) return false;
+    if (prevWorkspace === nextWorkspace) continue;
+    if (prevWorkspace.id !== nextWorkspace.id) return false;
+    if (prevWorkspace.title !== nextWorkspace.title) return false;
+    if (prevWorkspace.viewMode !== nextWorkspace.viewMode) return false;
+    if (prevWorkspace.snippetId !== nextWorkspace.snippetId) return false;
+    if (!workspaceNodeEqual(prevWorkspace.root, nextWorkspace.root)) return false;
+  }
+  return true;
+}
+
+// Live fields that are also published via sidePanelLiveStore (or dedicated
+// stores like scriptRunsStore). Slots subscribe to those stores directly, so
+// TerminalLayerView must NOT re-render on these ticks — only chrome-stable keys.
+const SIDE_PANEL_LIVE_CTX_KEYS = [
+  'activeTerminalSessionForSystem',
+  'activeSystemSessionHost',
+  'focusedHost',
+  'focusedSessionId',
+  'historySessionId',
+  'resolvedPreviewTheme',
+  'previewedOrVisibleThemeId',
+  'sftpActiveHost',
+  'activeTerminalSessionIdForSftp',
+  'activeTerminalCwd',
+  'activeTerminalCwdTrusted',
+  'activeWorkspace',
+  'focusedFontFamilyId',
+  'focusedFontFamilyOverridden',
+  'focusedFontSize',
+  'focusedFontSizeOverridden',
+  'focusedFontWeight',
+  'focusedFontWeightOverridden',
+  'focusedThemeOverridden',
+] as const;
+
+const SIDE_PANEL_STABLE_CTX_KEYS = [
+  'mountedSftpTabIds',
+  'notesMountedTabIds',
+  'notesOpenNoteByTab',
+  'scriptsMountedTabIds',
+  'systemMountedTabIds',
+  'themeMountedTabIds',
+  'handleHistoryPaste',
+  'handleHistoryDelete',
+  'handleHistoryRun',
+  'handleOpenHistory',
+  'HistorySidePanel',
+  'History',
+  'sidePanelWidth',
+  'sidePanelHeight',
+  'sidePanelPosition',
+  'isComposeBarOpen',
+  'sidePanelOpenTabs',
+  'sidePanelLayouts',
+  'sftpHostForTab',
+  'sftpPaneClosedTabIdsRef',
+  'sftpRetainedAfterCloseTabIdsRef',
+  'effectiveHosts',
+  'hosts',
+  // SFTP Connected picker reads live terminal sessions from stable ctx.
+  'sessions',
+  'sessionHostsMap',
+  'workspaceById',
+  'keys',
+  'identities',
+  'knownHosts',
+  'updateHosts',
+  'handleAddKnownHost',
+  'updateSnippets',
+  'updateSnippetPackages',
+  'sftpDefaultViewMode',
+  'sftpInitialLocationForTab',
+  'sftpPendingUploadsForTab',
+  'handleSftpCurrentPathChange',
+  'handleSftpActiveTransfersChange',
+  'handleSftpActiveExternalEditsChange',
+  'sftpDoubleClickBehavior',
+  'sftpAutoSync',
+  'sftpShowHiddenFiles',
+  'sftpUseCompressedUpload',
+  'sftpFollowTerminalCwd',
+  'setSftpFollowTerminalCwd',
+  'hotkeyScheme',
+  'keyBindings',
+  'editorWordWrap',
+  'setEditorWordWrap',
+  'getTerminalCwd',
+  'refocusActiveTerminalSession',
+  'terminalSettings',
+  'snippets',
+  'snippetPackages',
+  'handleSnippetFromPanel',
+  'handleRunScriptFromPanel',
+  'handleRunScriptOnWorkspace',
+  'handleStartRecordingFromPanel',
+  'handleStopScriptRun',
+  'handlePauseScriptRun',
+  'handleResumeScriptRun',
+  'followAppTerminalTheme',
+  'terminalTheme',
+  'terminalThemeId',
+  'terminalFontFamilyId',
+  'handleThemeChangeForFocusedSession',
+  'handleThemeResetForFocusedSession',
+  'handleFontFamilyChangeForFocusedSession',
+  'handleFontFamilyResetForFocusedSession',
+  'handleFontSizeChangeForFocusedSession',
+  'handleFontSizeResetForFocusedSession',
+  'handleFontWeightChangeForFocusedSession',
+  'handleFontWeightResetForFocusedSession',
+  'setSidePanelWidth',
+  'persistSidePanelWidth',
+  'setSidePanelHeight',
+  'persistSidePanelHeight',
+  'handleToggleSftpFromBar',
+  'handleOpenScripts',
+  'handleOpenTheme',
+  'handleOpenNotes',
+  'handleBackFromNotes',
+  'handleOpenHostFromNotes',
+  'handleOpenSystem',
+  'handleCloseSidePanel',
+  'handleFocusSidePanelPane',
+  'handleMagnifySidePanelPane',
+  'handleRestoreMagnifiedPane',
+  'handleSplitSidePanelPane',
+  'handleCloseSidePanelPane',
+  'handleResizeSidePanelSplit',
+  'setSidePanelPosition',
+  'handleSftpInitialLocationApplied',
+  'handlePendingUploadHandled',
+  'magnifiedPane',
+  'NotesManager',
+  't',
+] as const;
+
+const WORKSPACE_CTX_KEYS = [
+  'activeTabId',
+  'workspaceInnerRef',
+  'workspaceOuterRef',
+  'workspaceOverlayRef',
+  'draggingSessionId',
+  'isFocusMode',
+  'dropHint',
+  'setDropHint',
+  'computeSplitHint',
+  'handleWorkspaceDrop',
+  'sessions',
+  'sessionHostsMap',
+  'sessionChainHostsMap',
+  'sessionSudoAutofillPasswordsMap',
+  'sessionSudoAutofillCandidatesMap',
+  'workspaceById',
+  'workspaceRectsById',
+  'isTerminalLayerVisible',
+  'magnifiedPane',
+  'handleMagnifyTerminalPane',
+  'handleTerminalPaneInteraction',
+  'handleRestoreMagnifiedPane',
+  'workspaceFocusHandlersRef',
+  'workspaceBroadcastHandlersRef',
+  'splitHorizontalHandlersRef',
+  'splitVerticalHandlersRef',
+  'resolveSessionAppearance',
+  'hostMap',
+  'keys',
+  'identities',
+  'snippets',
+  'knownHosts',
+  'terminalFontFamilyId',
+  'fontSize',
+  'terminalTheme',
+  'followAppTerminalTheme',
+  // accentMode / customAccent come from appearanceChromeStore (Terminal leaf).
+  'terminalSettings',
+  'hotkeyScheme',
+  'disableTerminalFontZoom',
+  'restoreTerminalCwd',
+  'keyBindings',
+  'resizing',
+  'isComposeBarOpen',
+  'sessionLogConfig',
+  'sshDebugLogsEnabled',
+  'onHotkeyAction',
+  'handleTerminalFontSizeChange',
+  'handleOpenSftp',
+  'handleTerminalCwdChange',
+  'handleTerminalTitleChange',
+  'handleTerminalBell',
+  'handleTerminalOutput',
+  'handleTerminalContextReaderChange',
+  'handleOpenScripts',
+  'handleOpenHistory',
+  'handleOpenSystem',
+  'handleOpenTheme',
+  'handleCloseSession',
+  'handleStatusChange',
+  'handleSessionExit',
+  'handleTerminalDataCapture',
+  'handleOsDetected',
+  'handleUpdateHost',
+  'handleAddKnownHost',
+  'handleCommandExecuted',
+  'handleCommandSubmitted',
+  'onSetWorkspaceFocusedSession',
+  'onSplitSession',
+  'isBroadcastEnabled',
+  'handleBroadcastInput',
+  'handleBroadcastInterruptPriorityChange',
+  'handleToggleWorkspaceComposeBar',
+  'handleSnippetExecutorChange',
+  'handleProgrammaticCommandLogRewriteChange',
+  'activeResizers',
+  // activeWorkspace / focusedSessionId: TerminalLayerWorkspaceSection reads
+  // these from sidePanelLiveStore so tab switches do not invalidate workspace
+  // chrome solely because the active tab id changed.
+  'composeBarThemeColors',
+  'findSplitNode',
+  'handleComposeSend',
+  'handleSnippetFromPanel',
+  'refocusTerminalSession',
+  'setIsComposeBarOpen',
+  'TerminalComposeBar',
+  'setResizing',
+  'Array',
+  'cn',
+  'onStartSessionRename',
+  'onRemoveSessionFromWorkspace',
+  'onReorderTabs',
+  'onStartSessionDrag',
+  'onEndSessionDrag',
+  'isGlobalBroadcastEnabled',
+  'canUseGlobalBroadcast',
+  'onToggleGlobalBroadcast',
+] as const;
+
+export function terminalLayerSidePanelStableCtxEqual(prev: Ctx, next: Ctx): boolean {
+  for (const key of SIDE_PANEL_STABLE_CTX_KEYS as unknown as string[]) {
+    if (!sidePanelCtxKeyEqual(prev, next, key)) return false;
+  }
+  return true;
+}
+
+export function terminalLayerSidePanelCtxEqual(prev: Ctx, next: Ctx): boolean {
+  if (!terminalLayerSidePanelStableCtxEqual(prev, next)) return false;
+  for (const key of SIDE_PANEL_LIVE_CTX_KEYS as unknown as string[]) {
+    if (!sidePanelCtxKeyEqual(prev, next, key)) return false;
+  }
+  return true;
+}
+
+export function terminalLayerWorkspaceCtxEqual(prev: Ctx, next: Ctx): boolean {
+  for (const key of WORKSPACE_CTX_KEYS as unknown as string[]) {
+    if (!workspaceCtxKeyEqual(prev, next, key)) return false;
+  }
+  return true;
+}
+
+export function terminalLayerViewCtxEqual(prev: Ctx, next: Ctx): boolean {
+  if (prev.isTerminalLayerVisible !== next.isTerminalLayerVisible) return false;
+  if (prev.hibernateHiddenTabs !== next.hibernateHiddenTabs) return false;
+  if (prev.isComposeBarOpen !== next.isComposeBarOpen) return false;
+  // activeWorkspace / focusedSessionId intentionally omitted: live store +
+  // focus-sidebar equal handle those without forcing a full layer rebuild on
+  // every top-tab switch between terminal sessions.
+  if (prev.handleComposeSend !== next.handleComposeSend) return false;
+  if (prev.refocusTerminalSession !== next.refocusTerminalSession) return false;
+  if (prev.setIsComposeBarOpen !== next.setIsComposeBarOpen) return false;
+  if (prev.isBroadcastEnabled !== next.isBroadcastEnabled) return false;
+  if (prev.composeBarThemeColors !== next.composeBarThemeColors) return false;
+  if (prev.workspaceOuterRef !== next.workspaceOuterRef) return false;
+  // Use stable side-panel equal only: LIVE fields (cwd, theme focus, etc.) flow
+  // through sidePanelLiveStore and must not rebuild side-panel chrome.
+  return terminalLayerSidePanelStableCtxEqual(prev, next)
+    && terminalLayerFocusSidebarPropsEqual(prev, next)
+    && terminalLayerWorkspaceCtxEqual(prev, next);
+}
+
+export function terminalLayerFocusSidebarPropsEqual(prev: Ctx, next: Ctx): boolean {
+  if (prev.isFocusMode !== next.isFocusMode) return false;
+  if (!prev.isFocusMode) return true;
+
+  const prevWs = prev.activeWorkspace;
+  const nextWs = next.activeWorkspace;
+  if (Boolean(prevWs) !== Boolean(nextWs)) return false;
+  if (prevWs && nextWs) {
+    if (prevWs.id !== nextWs.id) return false;
+    if (prevWs.viewMode !== nextWs.viewMode) return false;
+    if (prevWs.root !== nextWs.root) return false;
+    if (prevWs.focusSessionOrder !== nextWs.focusSessionOrder) return false;
+  }
+
+  return eq(prev, next, 'focusedSessionId')
+    && eq(prev, next, 'resolvedPreviewTheme')
+    && eq(prev, next, 'sessionHostsMap')
+    && eq(prev, next, 'sessions')
+    && prev.terminalSettings?.dynamicTabTitleMode === next.terminalSettings?.dynamicTabTitleMode
+    && eq(prev, next, 't')
+    && eq(prev, next, 'onReorderWorkspaceSessions')
+    && eq(prev, next, 'onRequestAddToWorkspace')
+    && eq(prev, next, 'onAppendHostToWorkspace')
+    && eq(prev, next, 'handleCloseSession')
+    && eq(prev, next, 'onCopySession')
+    && eq(prev, next, 'onDuplicateSession')
+    && eq(prev, next, 'onCopySessionToNewWindow')
+    && eq(prev, next, 'onRemoveSessionFromWorkspace')
+    && eq(prev, next, 'onSetWorkspaceFocusedSession')
+    && eq(prev, next, 'onToggleWorkspaceViewMode')
+    && eq(prev, next, 'onSubmitSessionRename');
+}

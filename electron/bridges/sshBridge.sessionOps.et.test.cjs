@@ -1,0 +1,328 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
+
+const { createSessionOpsApi } = require("./sshBridge/sessionOps.cjs");
+const { selectServerStatsFixtureOutput } = require("./sshBridge/serverStatsTestHelpers.cjs");
+
+function fakeStream(stdout, waitForWrite = false) {
+  const stream = new EventEmitter();
+  stream.stderr = new EventEmitter();
+  let sent = false;
+  const send = () => {
+    if (sent) return;
+    sent = true;
+    if (stdout) stream.emit("data", Buffer.from(stdout));
+    stream.emit("close", 0);
+  };
+  stream.write = () => {
+    if (waitForWrite) setImmediate(send);
+    return true;
+  };
+  if (!waitForWrite) setImmediate(send);
+  return stream;
+}
+
+function fakeConn(stdout) {
+  return {
+    exec(command, cb) {
+      cb(null, fakeStream(selectServerStatsFixtureOutput(command, stdout)));
+    },
+  };
+}
+
+const LINUX_STATS =
+  "CPURAW:1000 900|CORES:4|PERCORERAW:|MEMINFO:8000 4000 100 900 0 0|PROCS:|DISKS:|NET:";
+
+function quoteShellArg(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+function makeApi(session, execOnEtSession, extra = {}) {
+  const sessions = new Map([["et-1", session]]);
+  return createSessionOpsApi({
+    sessions,
+    console,
+    setTimeout,
+    clearTimeout,
+    execOnEtSession,
+    quoteShellArg,
+    iconv: { encodingExists: () => true },
+    sessionEncodings: new Map(),
+    resetSessionDecoders: () => {},
+    measureSshPingLatency: async () => 3,
+    ...extra,
+  });
+}
+
+test("getSessionDistroInfo probes ET sessions through execOnEtSession", async () => {
+  let command = "";
+  const api = makeApi(
+    { type: "et", sshUserHost: "alice@example.test", sshOptions: [], sshEnv: {} },
+    async (_session, cmd) => {
+      command = cmd;
+      return { success: true, stdout: "NAME=Ubuntu\n", stderr: "" };
+    },
+  );
+
+  const result = await api.getSessionDistroInfo(null, { sessionId: "et-1" });
+
+  assert.equal(result.success, true);
+  assert.equal(result.stdout, "NAME=Ubuntu\n");
+  assert.match(command, /os-release/);
+});
+
+test("getServerStats opens an ET stats companion connection for direct ET sessions", async () => {
+  const session = {
+    type: "et",
+    sshUserHost: "alice@example.test",
+    sshOptions: [],
+    sshEnv: {},
+    etStatsAuth: { hostname: "example.test", username: "alice" },
+  };
+  let ensureCalls = 0;
+  let execFallbackCalls = 0;
+  const pingedConns = [];
+  const api = makeApi(
+    session,
+    async () => {
+      execFallbackCalls += 1;
+      return { success: true, stdout: LINUX_STATS, stderr: "" };
+    },
+    {
+      ensureEtStatsConnection: async (s, id) => {
+        ensureCalls += 1;
+        assert.equal(s, session);
+        assert.equal(id, "et-1");
+        s.etStatsConn = fakeConn(LINUX_STATS);
+        return s.etStatsConn;
+      },
+      measureSshPingLatency: async (conn) => {
+        pingedConns.push(conn);
+        return 3;
+      },
+    },
+  );
+
+  const result = await api.getServerStats(null, { sessionId: "et-1" });
+
+  assert.equal(ensureCalls, 1);
+  assert.equal(execFallbackCalls, 0);
+  assert.equal(session.conn, undefined);
+  assert.equal(result.success, true);
+  assert.equal(result.stats.memTotal, 8000);
+  assert.equal(result.stats.cpuCores, 4);
+  assert.equal(typeof result.stats.latencyMs, "number");
+  assert.deepEqual(pingedConns, [session.etStatsConn]);
+});
+
+test("getServerStats falls back to execOnEtSession for jumped ET sessions", async () => {
+  const commands = [];
+  let ensureCalls = 0;
+  const api = makeApi(
+    {
+      type: "et",
+      sshUserHost: "alice@example.test",
+      sshOptions: [],
+      sshEnv: {},
+      etStatsAuth: { hostname: "example.test", hasJumpHost: true },
+    },
+    async (_session, cmd) => {
+      commands.push(cmd);
+      return {
+        success: true,
+        stdout: cmd.includes('echo "DISKS:$disks"') ? "DISKS:" : LINUX_STATS,
+        stderr: "",
+      };
+    },
+    {
+      ensureEtStatsConnection: async () => {
+        ensureCalls += 1;
+        return null;
+      },
+    },
+  );
+
+  const result = await api.getServerStats(null, { sessionId: "et-1" });
+
+  assert.equal(ensureCalls, 0);
+  assert.equal(commands.length, 2);
+  assert.match(commands[0], /CPURAW|UNSUPPORTED_OS/);
+  assert.match(commands[1], /DISKS:/);
+  assert.ok(commands.every((command) => Buffer.byteLength(command, "utf8") <= 9000));
+  assert.equal(result.success, true);
+  assert.equal(result.stats.memTotal, 8000);
+  assert.equal(result.stats.latencyMs, null);
+  assert.ok(commands.every((command) => !/read -r nc_latency_probe/.test(command)));
+});
+
+test("getServerStats falls back to execOnEtSession when the direct ET companion is unavailable", async () => {
+  let execFallbackCalls = 0;
+  const api = makeApi(
+    {
+      type: "et",
+      sshUserHost: "alice@example.test",
+      sshOptions: [],
+      sshEnv: {},
+      etStatsAuth: { hostname: "example.test" },
+      etStatsConnFailed: true,
+    },
+    async (_session, command) => {
+      execFallbackCalls += 1;
+      return {
+        success: true,
+        stdout: command.includes('echo "DISKS:$disks"') ? "DISKS:" : LINUX_STATS,
+        stderr: "",
+      };
+    },
+    {
+      ensureEtStatsConnection: async () => {
+        throw new Error("should not retry failed companion");
+      },
+    },
+  );
+
+  const result = await api.getServerStats(null, { sessionId: "et-1" });
+
+  assert.equal(execFallbackCalls, 2);
+  assert.equal(result.success, true);
+  assert.equal(result.stats.memTotal, 8000);
+  // No SSH connection to ping in exec-fallback mode — latency stays unknown
+  // rather than opening an unauthenticated TCP probe to the SSH port (#3320).
+  assert.equal(result.stats.latencyMs, null);
+});
+
+test("readRemoteHistory probes ET sessions and parses the detected shell", async () => {
+  let command = "";
+  const stdout = [
+    "__NC_SHELL__zsh",
+    "__NC_ZSH__",
+    ": 1700000000:0;ls -la",
+    ": 1700000100:0;pwd",
+    "",
+  ].join("\n");
+  const api = makeApi(
+    { type: "et", sshUserHost: "alice@example.test", sshOptions: [], sshEnv: {} },
+    async (_session, cmd) => {
+      command = cmd;
+      return { success: true, stdout, stderr: "" };
+    },
+  );
+
+  const result = await api.readRemoteHistory(null, { sessionId: "et-1", limit: 500 });
+
+  assert.equal(result.success, true);
+  assert.equal(result.shell, "zsh");
+  assert.match(result.zsh, /ls -la/);
+  assert.equal(result.bash, "");
+  assert.equal(result.fish, "");
+  assert.match(command, /^exec sh -c /);
+  assert.doesNotMatch(command, /^SH=/);
+  assert.match(command, /getent passwd/);
+  assert.match(command, /case "\$SH" in/);
+});
+
+test("readRemoteHistory reads ~/.bash_history over an SSH exec channel", async () => {
+  const stdout = ["__NC_SHELL__bash", "__NC_BASH__", "ls -la", "pwd", ""].join("\n");
+  const api = makeApi({ conn: fakeConn(stdout) }, async () => {
+    throw new Error("execOnEtSession should not be used for ssh sessions");
+  });
+
+  const result = await api.readRemoteHistory(null, { sessionId: "et-1" });
+
+  assert.equal(result.success, true);
+  assert.equal(result.shell, "bash");
+  assert.match(result.bash, /ls -la/);
+  assert.match(result.bash, /pwd/);
+  assert.equal(result.zsh, "");
+});
+
+test("readRemoteHistory opens a Mosh stats companion when no conn exists", async () => {
+  const stdout = ["__NC_SHELL__bash", "__NC_BASH__", "make build", "git status", ""].join("\n");
+  const session = { type: "mosh", moshStatsAuth: { hostname: "h", password: "p" } };
+  let ensureCalls = 0;
+  const api = makeApi(
+    session,
+    async () => {
+      throw new Error("execOnEtSession should not be used for mosh sessions");
+    },
+    {
+      ensureMoshStatsConnection: async (s, id) => {
+        ensureCalls += 1;
+        assert.equal(s, session);
+        assert.equal(id, "et-1");
+        s.moshStatsConn = fakeConn(stdout);
+        return s.moshStatsConn;
+      },
+    },
+  );
+
+  const result = await api.readRemoteHistory({ sender: {} }, { sessionId: "et-1" });
+
+  assert.equal(ensureCalls, 1);
+  assert.equal(session.conn, undefined);
+  assert.equal(result.success, true);
+  assert.equal(result.shell, "bash");
+  assert.match(result.bash, /make build/);
+  assert.match(result.bash, /git status/);
+});
+
+test("readRemoteHistory reuses an existing Mosh companion without reconnecting", async () => {
+  const stdout = ["__NC_SHELL__zsh", "__NC_ZSH__", ": 1700000000:0;htop", ""].join("\n");
+  const session = { type: "mosh", moshStatsConn: fakeConn(stdout), moshStatsAuth: { hostname: "h" } };
+  const api = makeApi(
+    session,
+    async () => {
+      throw new Error("execOnEtSession should not be used for mosh sessions");
+    },
+    {
+      ensureMoshStatsConnection: async () => {
+        throw new Error("should not reconnect when a companion already exists");
+      },
+    },
+  );
+
+  const result = await api.readRemoteHistory(null, { sessionId: "et-1" });
+
+  assert.equal(result.success, true);
+  assert.equal(result.shell, "zsh");
+  assert.match(result.zsh, /htop/);
+  assert.equal(session.conn, undefined);
+});
+
+test("readRemoteHistory reports pending while the Mosh handshake is still in progress", async () => {
+  const session = { type: "mosh" };
+  const api = makeApi(
+    session,
+    async () => {
+      throw new Error("execOnEtSession should not be used for mosh sessions");
+    },
+    {
+      ensureMoshStatsConnection: async () => null,
+    },
+  );
+
+  const result = await api.readRemoteHistory(null, { sessionId: "et-1" });
+
+  assert.equal(result.success, false);
+  assert.equal(result.pending, true);
+  assert.equal(session.conn, undefined);
+});
+
+test("getSessionDistroInfo uses and reuses the Mosh stats companion", async () => {
+  const session = { type: "mosh", moshStatsAuth: { hostname: "h" } };
+  let connections = 0;
+  const api = makeApi(session, async () => { throw new Error("not ET"); }, {
+    ensureMoshStatsConnection: async (target) => {
+      connections++;
+      target.moshStatsConn = fakeConn('ID=ubuntu');
+    },
+  });
+  for (let i = 0; i < 2; i++) {
+    const result = await api.getSessionDistroInfo(null, { sessionId: 'et-1' });
+    assert.equal(result.success, true);
+    assert.equal(result.stdout, 'ID=ubuntu');
+  }
+  assert.equal(connections, 1);
+  assert.equal(session.conn, undefined);
+});

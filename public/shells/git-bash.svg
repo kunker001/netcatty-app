@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Git logo inspired icon -->
+  <rect width="32" height="32" rx="5" fill="#F05032"/>
+  <!-- Git diamond shape -->
+  <path d="M16 4 L28 16 L16 28 L4 16 Z" fill="none" stroke="#FFFFFF" stroke-width="2.5"/>
+  <!-- Git branch lines inside -->
+  <circle cx="16" cy="11" r="2.5" fill="#FFFFFF"/>
+  <circle cx="11" cy="16" r="2.5" fill="#FFFFFF"/>
+  <circle cx="21" cy="16" r="2.5" fill="#FFFFFF"/>
+  <line x1="16" y1="13.5" x2="16" y2="22" stroke="#FFFFFF" stroke-width="2"/>
+  <line x1="13.3" y1="17.5" x2="16" y2="22" stroke="#FFFFFF" stroke-width="2"/>
+  <circle cx="16" cy="22" r="2" fill="#FFFFFF"/>
+</svg>

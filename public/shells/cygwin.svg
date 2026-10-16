@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Dark rounded square -->
+  <rect width="32" height="32" rx="6" fill="#1A1A2E"/>
+  <!-- Gold border accent -->
+  <rect x="1" y="1" width="30" height="30" rx="5" fill="none" stroke="#FFD700" stroke-width="1.5"/>
+  <!-- CY text in gold -->
+  <text x="16" y="21" font-family="monospace" font-size="13" font-weight="bold" fill="#FFD700" text-anchor="middle">CY</text>
+</svg>

@@ -1,0 +1,746 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+const {
+  applyInitialJmsDeepLinkPreference,
+  applyInitialSshDeepLinkPreference,
+  applyJmsProtocolClientPreference,
+  applySshProtocolClientPreference,
+  getSshDeepLinkRendererReadyTimeoutMs,
+  collectJmsDeepLinkUrls,
+  collectPuttyStyleDeepLinkUrls,
+  collectSshDeepLinkQueueItems,
+  collectSshDeepLinkUrls,
+  collectTelnetDeepLinkUrls,
+  isJmsDeepLinkUrl,
+  isSshDeepLinkUrl,
+  isTelnetDeepLinkUrl,
+  readJmsDeepLinkEnabledPreference,
+  readSshDeepLinkEnabledPreference,
+  shouldDeliverJmsDeepLink,
+  shouldDeliverSshDeepLink,
+  shouldRequeueFailedSshDeepLinkDelivery,
+  updateJmsDeepLinkEnabledPreference,
+  updateSshDeepLinkEnabledPreference,
+  writeJmsDeepLinkEnabledPreference,
+  writeSshDeepLinkEnabledPreference,
+} = require("./deepLink.cjs");
+
+test("isSshDeepLinkUrl accepts only ssh URLs", () => {
+  assert.equal(isSshDeepLinkUrl("ssh://alice@example.com:2200"), true);
+  assert.equal(isSshDeepLinkUrl("SSH://alice@example.com"), true);
+  assert.equal(isSshDeepLinkUrl("ssh://example.com:99999"), true);
+  assert.equal(isSshDeepLinkUrl("https://example.com"), false);
+  assert.equal(isSshDeepLinkUrl("--flag"), false);
+});
+
+test("collectSshDeepLinkUrls extracts ssh URLs from process arguments", () => {
+  assert.deepEqual(
+    collectSshDeepLinkUrls([
+      "/Applications/Netcatty.app/Contents/MacOS/Netcatty",
+      "--flag",
+      "ssh://alice@example.com",
+      "file:///tmp/example",
+      "ssh://bob@example.net:2222",
+    ]),
+    ["ssh://alice@example.com", "ssh://bob@example.net:2222"],
+  );
+});
+
+test("collectPuttyStyleDeepLinkUrls converts PuTTY argv when no ssh:// token is present", () => {
+  assert.deepEqual(
+    collectPuttyStyleDeepLinkUrls([
+      String.raw`C:\Program Files\Netcatty\Netcatty.exe`,
+      "-ssh",
+      "alice@10.0.0.8",
+      "-P",
+      "2222",
+      "-pw",
+      "s3cret",
+    ]),
+    { ssh: ["ssh://alice:s3cret@10.0.0.8:2222"], telnet: [] },
+  );
+});
+
+test("collectPuttyStyleDeepLinkUrls leaves ssh:// tokens to the existing collector", () => {
+  assert.deepEqual(
+    collectPuttyStyleDeepLinkUrls([
+      "Netcatty.exe",
+      "-url",
+      "ssh://alice@example.com",
+      "-ssh",
+      "ignored@host",
+    ]),
+    { ssh: [], telnet: [] },
+  );
+});
+
+test("collectSshDeepLinkQueueItems preserves tolerated PuTTY-style -newtab names", () => {
+  assert.deepEqual(
+    collectSshDeepLinkQueueItems([
+      "Netcatty.exe",
+      "-newtab",
+      "Production",
+      "-ssh",
+      "root@192.168.1.122",
+      "-P",
+      "22",
+    ], { includeSchemeUrls: false }),
+    {
+      ssh: [{
+        rawUrl: "ssh://root@192.168.1.122:22",
+        viaCommandLine: true,
+        tabName: "Production",
+      }],
+      telnet: [],
+    },
+  );
+});
+
+test("collectSshDeepLinkQueueItems preserves SecureCRT /N names", () => {
+  assert.deepEqual(
+    collectSshDeepLinkQueueItems([
+      "Netcatty.exe",
+      "/SSH2",
+      "/L",
+      "root",
+      "/P",
+      "22",
+      "/N",
+      "Production",
+      "192.168.1.122",
+    ], { includeSchemeUrls: false }),
+    {
+      ssh: [{
+        rawUrl: "ssh://root@192.168.1.122:22",
+        viaCommandLine: true,
+        tabName: "Production",
+      }],
+      telnet: [],
+    },
+  );
+});
+
+test("collectSshDeepLinkQueueItems keeps PuTTY CLI launches when scheme URLs are disabled", () => {
+  // Warm second-instance case: the running app forwarded another launch's
+  // argv while the ssh:// protocol-client preference is disabled.
+  assert.deepEqual(
+    collectSshDeepLinkQueueItems([
+      String.raw`C:\Program Files\Netcatty\Netcatty.exe`,
+      "-ssh",
+      "alice@10.0.0.8",
+      "-P",
+      "2222",
+      "-pw",
+      "s3cret",
+    ], { includeSchemeUrls: false }),
+    { ssh: [{ rawUrl: "ssh://alice:s3cret@10.0.0.8:2222", viaCommandLine: true }], telnet: [] },
+  );
+});
+
+test("collectPuttyStyleDeepLinkUrls converts SecureCRT-style argv", () => {
+  assert.deepEqual(
+    collectPuttyStyleDeepLinkUrls([
+      String.raw`C:\Program Files\Netcatty\Netcatty.exe`,
+      "/SSH2",
+      "/L",
+      "alice",
+      "/P",
+      "2222",
+      "/PASSWORD",
+      "s3cret",
+      "10.0.0.8",
+    ]),
+    { ssh: ["ssh://alice:s3cret@10.0.0.8:2222"], telnet: [] },
+  );
+});
+
+test("collectPuttyStyleDeepLinkUrls routes SecureCRT /TELNET to the telnet queue", () => {
+  assert.deepEqual(
+    collectPuttyStyleDeepLinkUrls([
+      "Netcatty.exe",
+      "/TELNET",
+      "old.example.com",
+      "/P",
+      "2323",
+    ]),
+    { ssh: [], telnet: ["telnet://old.example.com:2323"] },
+  );
+});
+
+test("collectSshDeepLinkQueueItems keeps SecureCRT CLI launches when scheme URLs are disabled", () => {
+  assert.deepEqual(
+    collectSshDeepLinkQueueItems([
+      "Netcatty.exe",
+      "/SSH2",
+      "/L",
+      "alice",
+      "/P",
+      "2222",
+      "/PASSWORD",
+      "s3cret",
+      "10.0.0.8",
+    ], { includeSchemeUrls: false }),
+    { ssh: [{ rawUrl: "ssh://alice:s3cret@10.0.0.8:2222", viaCommandLine: true }], telnet: [] },
+  );
+});
+
+test("collectPuttyStyleDeepLinkUrls connects SecureCRT launches whose password looks like a scheme URL", () => {
+  // (#3391) A /PASSWORD value starting with ssh:// must never win the
+  // scheme-token early return: the whole CLI launch would be dropped.
+  assert.deepEqual(
+    collectPuttyStyleDeepLinkUrls([
+      "Netcatty.exe",
+      "/SSH2",
+      "/L",
+      "alice",
+      "/PASSWORD",
+      "ssh://s3cret",
+      "10.0.0.8",
+    ]),
+    { ssh: ["ssh://alice:ssh%3A%2F%2Fs3cret@10.0.0.8"], telnet: [] },
+  );
+});
+
+test("collectSshDeepLinkQueueItems does not queue SecureCRT password values as scheme links", () => {
+  // (#3391) With scheme handling enabled, the password operand must not be
+  // queued as a standalone ssh:// link to host "s3cret".
+  assert.deepEqual(
+    collectSshDeepLinkQueueItems([
+      "Netcatty.exe",
+      "/SSH2",
+      "/L",
+      "alice",
+      "/PASSWORD",
+      "ssh://s3cret",
+      "10.0.0.8",
+    ], { includeSchemeUrls: true }),
+    { ssh: [{ rawUrl: "ssh://alice:ssh%3A%2F%2Fs3cret@10.0.0.8", viaCommandLine: true }], telnet: [] },
+  );
+});
+
+test("collectSshDeepLinkQueueItems filters password operands even when the SecureCRT parse fails", () => {
+  // (#3391) `/P 99999` makes the launch unparseable, but the /PASSWORD value
+  // was already consumed as a credential: it must not be queued as a
+  // standalone ssh:// link to host "s3cret".
+  assert.deepEqual(
+    collectSshDeepLinkQueueItems([
+      "Netcatty.exe",
+      "/SSH2",
+      "/PASSWORD",
+      "ssh://s3cret",
+      "/P",
+      "99999",
+      "10.0.0.8",
+    ], { includeSchemeUrls: true }),
+    { ssh: [], telnet: [] },
+  );
+});
+
+test("collectSshDeepLinkQueueItems keeps genuine scheme links alongside a failed SecureCRT parse", () => {
+  // A failed parse must only filter credential operands, not every consumed
+  // index, so genuine scheme links in the same argv still queue.
+  assert.deepEqual(
+    collectSshDeepLinkQueueItems([
+      "Netcatty.exe",
+      "/SSH2",
+      "/PASSWORD",
+      "s3cret",
+      "/P",
+      "99999",
+      "10.0.0.8",
+      "ssh://bob@example.com",
+    ], { includeSchemeUrls: true }),
+    { ssh: [{ rawUrl: "ssh://bob@example.com", viaCommandLine: false }], telnet: [] },
+  );
+});
+
+for (const url of ["ssh://bob@example.com", "ssh://example.com", "telnet://example.com", " ssh://bob@example.com "]) {
+  test(`standalone scheme link ${url} never inherits SecureCRT credentials`, () => {
+    const argv = ["Netcatty.exe", "/SSH2", "/L", "alice", "/PASSWORD",
+      "secret", "10.0.0.8", url];
+    const protocol = new URL(url).protocol === "ssh:" ? "ssh" : "telnet";
+    const expected = { ssh: [], telnet: [] };
+    expected[protocol].push({ rawUrl: url, viaCommandLine: false });
+    assert.deepEqual(collectSshDeepLinkQueueItems(argv), expected);
+    assert.deepEqual(collectSshDeepLinkQueueItems(argv, { includeSchemeUrls: false }), {
+      ssh: [], telnet: [],
+    });
+  });
+}
+
+test("collectSshDeepLinkQueueItems keeps scheme URL gating separate from CLI launches", () => {
+  const queueItems = collectSshDeepLinkQueueItems(
+    ["/Applications/Netcatty.app/Contents/MacOS/Netcatty", "ssh://alice@example.com"],
+    { includeSchemeUrls: true },
+  );
+  assert.deepEqual(queueItems.ssh, [{ rawUrl: "ssh://alice@example.com", viaCommandLine: false }]);
+  assert.deepEqual(queueItems.telnet, []);
+
+  const disabledQueueItems = collectSshDeepLinkQueueItems(
+    ["/Applications/Netcatty.app/Contents/MacOS/Netcatty", "ssh://alice@example.com"],
+    { includeSchemeUrls: false },
+  );
+  assert.deepEqual(disabledQueueItems.ssh, []);
+  assert.deepEqual(disabledQueueItems.telnet, []);
+});
+
+test("applySshProtocolClientPreference registers or removes ssh and telnet handlers", () => {
+  const calls = [];
+  const app = {
+    setAsDefaultProtocolClient: (...args) => {
+      calls.push(["set", ...args]);
+      return true;
+    },
+    removeAsDefaultProtocolClient: (...args) => {
+      calls.push(["remove", ...args]);
+      return true;
+    },
+  };
+
+  assert.equal(applySshProtocolClientPreference({ app, enabled: true, isDev: false }), true);
+  assert.equal(applySshProtocolClientPreference({ app, enabled: false, isDev: false }), true);
+  assert.deepEqual(calls, [
+    ["set", "ssh"],
+    ["set", "telnet"],
+    ["remove", "ssh"],
+    ["remove", "telnet"],
+  ]);
+});
+
+test("applySshProtocolClientPreference keeps ssh successful when telnet registration fails", () => {
+  const calls = [];
+  const app = {
+    setAsDefaultProtocolClient: (protocol) => {
+      calls.push(["set", protocol]);
+      return protocol === "ssh";
+    },
+    removeAsDefaultProtocolClient: (protocol) => {
+      calls.push(["remove", protocol]);
+      return protocol === "ssh";
+    },
+  };
+
+  assert.equal(applySshProtocolClientPreference({ app, enabled: true, isDev: false }), true);
+  assert.equal(applySshProtocolClientPreference({ app, enabled: false, isDev: false }), true);
+  assert.deepEqual(calls, [
+    ["set", "ssh"],
+    ["set", "telnet"],
+    ["remove", "ssh"],
+    ["remove", "telnet"],
+  ]);
+});
+
+test("applySshProtocolClientPreference rolls back telnet registration when ssh enable fails", () => {
+  const calls = [];
+  const app = {
+    setAsDefaultProtocolClient: (protocol) => {
+      calls.push(["set", protocol]);
+      return protocol === "telnet";
+    },
+    removeAsDefaultProtocolClient: (protocol) => {
+      calls.push(["remove", protocol]);
+      return true;
+    },
+  };
+
+  assert.equal(applySshProtocolClientPreference({ app, enabled: true, isDev: false }), false);
+  assert.deepEqual(calls, [
+    ["set", "ssh"],
+    ["set", "telnet"],
+    ["remove", "telnet"],
+  ]);
+});
+
+test("applySshProtocolClientPreference restores telnet registration when ssh disable fails", () => {
+  const calls = [];
+  const app = {
+    setAsDefaultProtocolClient: (protocol) => {
+      calls.push(["set", protocol]);
+      return true;
+    },
+    removeAsDefaultProtocolClient: (protocol) => {
+      calls.push(["remove", protocol]);
+      return protocol === "telnet";
+    },
+  };
+
+  assert.equal(applySshProtocolClientPreference({ app, enabled: false, isDev: false }), false);
+  assert.deepEqual(calls, [
+    ["remove", "ssh"],
+    ["remove", "telnet"],
+    ["set", "telnet"],
+  ]);
+});
+
+test("isTelnetDeepLinkUrl accepts only telnet URLs", () => {
+  assert.equal(isTelnetDeepLinkUrl("telnet://example.com:2001"), true);
+  assert.equal(isTelnetDeepLinkUrl("TELNET://example.com:2001"), true);
+  assert.equal(isTelnetDeepLinkUrl("ssh://alice@example.com"), false);
+  assert.equal(isTelnetDeepLinkUrl("--flag"), false);
+});
+
+test("collectTelnetDeepLinkUrls extracts telnet URLs from process arguments", () => {
+  assert.deepEqual(
+    collectTelnetDeepLinkUrls([
+      "/Applications/Netcatty.app/Contents/MacOS/Netcatty",
+      "--flag",
+      "telnet://example.com:2001",
+      "file:///tmp/example",
+      "telnet://router.local:23",
+    ]),
+    ["telnet://example.com:2001", "telnet://router.local:23"],
+  );
+});
+
+test("ssh deep link enabled preference persists outside renderer localStorage", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-deeplink-"));
+  const app = { getPath: () => userDataDir };
+
+  assert.equal(readSshDeepLinkEnabledPreference({ app }), true);
+  assert.equal(writeSshDeepLinkEnabledPreference({ app, enabled: false }), true);
+  assert.equal(readSshDeepLinkEnabledPreference({ app }), false);
+  assert.equal(writeSshDeepLinkEnabledPreference({ app, enabled: true }), true);
+  assert.equal(readSshDeepLinkEnabledPreference({ app }), true);
+});
+
+test("updateSshDeepLinkEnabledPreference keeps the previous state when the system change fails", () => {
+  const writes = [];
+  const result = updateSshDeepLinkEnabledPreference({
+    currentEnabled: true,
+    enabled: false,
+    applyPreference: () => false,
+    writePreference: (enabled) => {
+      writes.push(enabled);
+      return true;
+    },
+  });
+
+  assert.deepEqual(result, { enabled: true, success: false });
+  assert.deepEqual(writes, []);
+});
+
+test("updateSshDeepLinkEnabledPreference clears queued links after disabling succeeds", () => {
+  const writes = [];
+  let cleared = false;
+  const result = updateSshDeepLinkEnabledPreference({
+    currentEnabled: true,
+    enabled: false,
+    applyPreference: () => true,
+    writePreference: (enabled) => {
+      writes.push(enabled);
+      return true;
+    },
+    clearPending: () => {
+      cleared = true;
+    },
+  });
+
+  assert.deepEqual(result, { enabled: false, success: true });
+  assert.deepEqual(writes, [false]);
+  assert.equal(cleared, true);
+});
+
+test("updateSshDeepLinkEnabledPreference rolls back when saving the setting fails", () => {
+  const applied = [];
+  const result = updateSshDeepLinkEnabledPreference({
+    currentEnabled: true,
+    enabled: false,
+    applyPreference: (enabled) => {
+      applied.push(enabled);
+      return true;
+    },
+    writePreference: () => false,
+  });
+
+  assert.deepEqual(result, { enabled: true, success: false });
+  assert.deepEqual(applied, [false, true]);
+});
+
+test("updateSshDeepLinkEnabledPreference clears links when save and rollback both fail disabled", () => {
+  const applied = [];
+  let cleared = false;
+  const result = updateSshDeepLinkEnabledPreference({
+    currentEnabled: true,
+    enabled: false,
+    applyPreference: (enabled) => {
+      applied.push(enabled);
+      return enabled === false;
+    },
+    writePreference: () => false,
+    clearPending: () => {
+      cleared = true;
+    },
+  });
+
+  assert.deepEqual(result, { enabled: false, success: false });
+  assert.deepEqual(applied, [false, true]);
+  assert.equal(cleared, true);
+});
+
+test("shouldDeliverSshDeepLink drops stale deliveries after the setting changes", () => {
+  assert.equal(shouldDeliverSshDeepLink({
+    enabled: true,
+    deliveryGeneration: 1,
+    expectedGeneration: 1,
+  }), true);
+  assert.equal(shouldDeliverSshDeepLink({
+    enabled: false,
+    deliveryGeneration: 1,
+    expectedGeneration: 1,
+  }), false);
+  assert.equal(shouldDeliverSshDeepLink({
+    enabled: true,
+    deliveryGeneration: 2,
+    expectedGeneration: 1,
+  }), false);
+});
+
+test("getSshDeepLinkRendererReadyTimeoutMs waits indefinitely so slow unlock keeps links", () => {
+  assert.equal(getSshDeepLinkRendererReadyTimeoutMs({ isDev: false }), 0);
+  assert.equal(getSshDeepLinkRendererReadyTimeoutMs({ isDev: true }), 0);
+});
+
+test("shouldRequeueFailedSshDeepLinkDelivery keeps valid links after readiness failures", () => {
+  assert.equal(shouldRequeueFailedSshDeepLinkDelivery({
+    enabled: true,
+    deliveryGeneration: 1,
+    expectedGeneration: 1,
+    result: { success: false, reason: "Renderer did not report ready before timeout." },
+  }), true);
+  assert.equal(shouldRequeueFailedSshDeepLinkDelivery({
+    enabled: true,
+    deliveryGeneration: 1,
+    expectedGeneration: 1,
+    result: { success: false, reason: "ssh-deep-link-disabled" },
+    cancelReason: "ssh-deep-link-disabled",
+  }), false);
+  assert.equal(shouldRequeueFailedSshDeepLinkDelivery({
+    enabled: true,
+    deliveryGeneration: 1,
+    expectedGeneration: 1,
+    result: { success: true },
+  }), false);
+  assert.equal(shouldRequeueFailedSshDeepLinkDelivery({
+    enabled: false,
+    deliveryGeneration: 1,
+    expectedGeneration: 1,
+    result: { success: false, reason: "window closed" },
+  }), false);
+});
+
+test("applyInitialSshDeepLinkPreference disables handling when startup registration fails", () => {
+  let cleared = false;
+  const warnings = [];
+  const result = applyInitialSshDeepLinkPreference({
+    enabled: true,
+    applyPreference: () => false,
+    clearPending: () => {
+      cleared = true;
+    },
+    logWarn: (message) => warnings.push(message),
+  });
+
+  assert.deepEqual(result, { enabled: false, success: false });
+  assert.equal(cleared, true);
+  assert.equal(warnings.length, 1);
+});
+
+test("isJmsDeepLinkUrl accepts only jms URLs", () => {
+  assert.equal(isJmsDeepLinkUrl("jms://payload"), true);
+  assert.equal(isJmsDeepLinkUrl("JMS://payload"), true);
+  assert.equal(isJmsDeepLinkUrl("ssh://alice@example.com"), false);
+  assert.equal(isJmsDeepLinkUrl("--flag"), false);
+});
+
+test("collectJmsDeepLinkUrls extracts jms URLs from process arguments", () => {
+  assert.deepEqual(
+    collectJmsDeepLinkUrls([
+      "/Applications/Netcatty.app/Contents/MacOS/Netcatty",
+      "--flag",
+      "jms://payload-one",
+      "file:///tmp/example",
+      "jms://payload-two",
+    ]),
+    ["jms://payload-one", "jms://payload-two"],
+  );
+});
+
+test("applyJmsProtocolClientPreference registers or removes the jms handler", () => {
+  const calls = [];
+  const app = {
+    setAsDefaultProtocolClient: (...args) => {
+      calls.push(["set", ...args]);
+      return true;
+    },
+    removeAsDefaultProtocolClient: (...args) => {
+      calls.push(["remove", ...args]);
+      return true;
+    },
+  };
+
+  assert.equal(applyJmsProtocolClientPreference({ app, enabled: true, isDev: false }), true);
+  assert.equal(applyJmsProtocolClientPreference({ app, enabled: false, isDev: false }), true);
+  assert.deepEqual(calls, [
+    ["set", "jms"],
+    ["remove", "jms"],
+  ]);
+});
+
+test("jms deep link enabled preference defaults to disabled", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-jms-deeplink-"));
+  const app = { getPath: () => userDataDir };
+
+  assert.equal(readJmsDeepLinkEnabledPreference({ app }), false);
+  assert.equal(writeJmsDeepLinkEnabledPreference({ app, enabled: true }), true);
+  assert.equal(readJmsDeepLinkEnabledPreference({ app }), true);
+  assert.equal(writeJmsDeepLinkEnabledPreference({ app, enabled: false }), true);
+  assert.equal(readJmsDeepLinkEnabledPreference({ app }), false);
+});
+
+test("updateJmsDeepLinkEnabledPreference keeps the previous state when the system change fails", () => {
+  const writes = [];
+  const result = updateJmsDeepLinkEnabledPreference({
+    currentEnabled: false,
+    enabled: true,
+    applyPreference: () => false,
+    writePreference: (enabled) => {
+      writes.push(enabled);
+      return true;
+    },
+  });
+
+  assert.deepEqual(result, { enabled: false, success: false });
+  assert.deepEqual(writes, []);
+});
+
+test("updateJmsDeepLinkEnabledPreference clears queued links after disabling succeeds", () => {
+  const writes = [];
+  let cleared = false;
+  const result = updateJmsDeepLinkEnabledPreference({
+    currentEnabled: true,
+    enabled: false,
+    applyPreference: () => true,
+    writePreference: (enabled) => {
+      writes.push(enabled);
+      return true;
+    },
+    clearPending: () => {
+      cleared = true;
+    },
+  });
+
+  assert.deepEqual(result, { enabled: false, success: true });
+  assert.deepEqual(writes, [false]);
+  assert.equal(cleared, true);
+});
+
+test("updateJmsDeepLinkEnabledPreference rolls back when saving the setting fails", () => {
+  const applied = [];
+  const result = updateJmsDeepLinkEnabledPreference({
+    currentEnabled: false,
+    enabled: true,
+    applyPreference: (enabled) => {
+      applied.push(enabled);
+      return true;
+    },
+    writePreference: () => false,
+  });
+
+  assert.deepEqual(result, { enabled: false, success: false });
+  assert.deepEqual(applied, [true, false]);
+});
+
+test("shouldDeliverJmsDeepLink drops stale deliveries after the setting changes", () => {
+  assert.equal(shouldDeliverJmsDeepLink({
+    enabled: true,
+    deliveryGeneration: 1,
+    expectedGeneration: 1,
+  }), true);
+  assert.equal(shouldDeliverJmsDeepLink({
+    enabled: false,
+    deliveryGeneration: 1,
+    expectedGeneration: 1,
+  }), false);
+  assert.equal(shouldDeliverJmsDeepLink({
+    enabled: true,
+    deliveryGeneration: 2,
+    expectedGeneration: 1,
+  }), false);
+});
+
+test("applyInitialJmsDeepLinkPreference does not warn when disabled startup removal fails", () => {
+  let cleared = false;
+  const warnings = [];
+  const result = applyInitialJmsDeepLinkPreference({
+    enabled: false,
+    applyPreference: () => false,
+    clearPending: () => {
+      cleared = true;
+    },
+    logWarn: (message) => warnings.push(message),
+  });
+
+  assert.deepEqual(result, { enabled: false, success: false });
+  assert.equal(cleared, false);
+  assert.equal(warnings.length, 0);
+});
+
+for (const flag of ["/L", "/P", "/PASSWORD", "/PASSPHRASE", "/AUTH", "/I", "/S", "/N", "/TITLEBAR", "/LOG", "/LOGAPPEND", "/FIREWALL", "/FWFIREWALL", "/PROXY"]) {
+  for (const scheme of ["ssh", "telnet", "jms"]) {
+    test(`malformed SecureCRT launch filters ${flag} ${scheme} operands`, () => {
+      const argv = ["Netcatty.exe", "/SSH2", "/P", "99999", flag,
+        `${scheme}://option-value`, "real.example.com"];
+      assert.deepEqual(collectSshDeepLinkQueueItems(argv), { ssh: [], telnet: [] });
+      assert.deepEqual(collectJmsDeepLinkUrls(argv), []);
+    });
+  }
+}
+
+test("failed SecureCRT launch cannot reinterpret its password as a PuTTY switch", () => {
+  const argv = ["Netcatty.exe", "/SSH2", "/L", "alice", "/P", "99999", "/PASSWORD", "-ssh", "server.example.com"];
+  assert.deepEqual(collectSshDeepLinkQueueItems(argv), { ssh: [], telnet: [] });
+});
+
+for (const password of ["/SSH2", "/TELNET", "/PASSWORD", "/PASSPHRASE"]) {
+  test(`PuTTY password ${password} does not select SecureCRT parsing`, () => {
+    assert.deepEqual(collectSshDeepLinkQueueItems([
+      "Netcatty.exe", "-ssh", "-l", "alice", "-P", "2222", "-pw", password, "server.example.com",
+    ]), { ssh: [{ rawUrl: `ssh://alice:${encodeURIComponent(password)}@server.example.com:2222`, viaCommandLine: true }], telnet: [] });
+  });
+}
+
+test("flag-shaped SecureCRT passwords do not consume genuine scheme links", () => {
+  assert.deepEqual(collectSshDeepLinkQueueItems([
+    "Netcatty.exe", "/SSH2", "/PASSWORD", "/L", "ssh://bob@example.com",
+  ]), { ssh: [{ rawUrl: "ssh://bob@example.com", viaCommandLine: false }], telnet: [] });
+});
+
+test("ambiguous SecureCRT destinations are rejected instead of guessing a host", () => {
+  for (const names of [["Device", "bastion"], ["device.example.com", "bastion"]]) {
+    assert.deepEqual(collectSshDeepLinkQueueItems([
+      "Netcatty.exe", "/T", names[0], "/SSH2", names[1], "/L", "alice", "/PASSWORD", "secret",
+    ]), { ssh: [], telnet: [] });
+  }
+});
+
+test("SecureCRT launches reject mixed single-dash client switches", () => {
+  for (const flag of ["-serial", "-raw", "-telnet", "-ssh", "-unknown"]) {
+    assert.deepEqual(collectSshDeepLinkQueueItems([
+      "Netcatty.exe", "/SSH2", flag, "host", "/L", "alice", "/PASSWORD", "secret",
+    ]), { ssh: [], telnet: [] });
+  }
+});
+
+test("SecureCRT launches preserve dash-shaped values and Electron switches", () => {
+  assert.deepEqual(collectSshDeepLinkQueueItems([
+    "Netcatty.exe", "--original-process-start-time=1", "/SSH2", "host",
+    "/TITLEBAR", "-serial", "/L", "-raw", "/PASSWORD", "-telnet",
+  ]), { ssh: [{ rawUrl: "ssh://-raw:-telnet@host", viaCommandLine: true }], telnet: [] });
+});

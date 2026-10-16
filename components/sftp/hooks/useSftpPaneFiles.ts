@@ -1,0 +1,90 @@
+import { useMemo } from "react";
+import type { SftpFileEntry } from "../../../types";
+import type { SftpPane } from "../../../application/state/sftp/types";
+import { isWindowsRoot, resolveSftpWindowsPathOptions } from "../../../application/state/sftp/utils";
+import type { SortField, SortOrder } from "../utils";
+import { filterHiddenFiles, filterSftpEntriesByName, sortSftpEntries } from "../utils";
+
+interface UseSftpPaneFilesParams {
+  files: SftpFileEntry[];
+  filter: string;
+  connection: SftpPane["connection"] | null;
+  showHiddenFiles: boolean;
+  enableListView: boolean;
+  sortField: SortField;
+  sortOrder: SortOrder;
+  directoriesFirst: boolean;
+}
+
+interface UseSftpPaneFilesResult {
+  filteredFiles: SftpFileEntry[];
+  displayFiles: SftpFileEntry[];
+  sortedDisplayFiles: SftpFileEntry[];
+}
+
+export const useSftpPaneFiles = ({
+  files,
+  filter,
+  connection,
+  showHiddenFiles,
+  enableListView,
+  sortField,
+  sortOrder,
+  directoriesFirst,
+}: UseSftpPaneFilesParams): UseSftpPaneFilesResult => {
+  // Extract ".." once and process the remaining files through filter -> sort
+  // in fewer passes, instead of repeatedly filtering/finding ".." entries.
+  const filteredFiles = useMemo(() => {
+    if (!enableListView) return [] as SftpFileEntry[];
+    return filterSftpEntriesByName(
+      filterHiddenFiles(files, showHiddenFiles),
+      filter,
+    );
+  }, [enableListView, files, filter, showHiddenFiles]);
+
+  const { displayFiles, sortedDisplayFiles } = useMemo(() => {
+    if (!connection || !enableListView) {
+      return { displayFiles: [] as SftpFileEntry[], sortedDisplayFiles: [] as SftpFileEntry[] };
+    }
+
+    const isRootPath =
+      connection.currentPath === "/" ||
+      isWindowsRoot(
+        connection.currentPath,
+        resolveSftpWindowsPathOptions(connection.currentPath, connection.homeDir),
+      );
+
+    // Split ".." from other files in a single pass
+    let parentEntry: SftpFileEntry | undefined;
+    const otherFiles: SftpFileEntry[] = [];
+    for (const f of filteredFiles) {
+      if (f.name === "..") {
+        parentEntry = f;
+      } else {
+        otherFiles.push(f);
+      }
+    }
+
+    // For non-root paths, always ensure a ".." entry exists
+    if (!isRootPath && !parentEntry) {
+      parentEntry = {
+        name: "..",
+        type: "directory",
+        size: 0,
+        sizeFormatted: "--",
+        lastModified: 0,
+        lastModifiedFormatted: "--",
+      };
+    }
+
+    const display = parentEntry ? [parentEntry, ...otherFiles] : otherFiles;
+    const sorted = otherFiles.length
+      ? sortSftpEntries(otherFiles, sortField, sortOrder, directoriesFirst)
+      : otherFiles;
+    const sortedDisplay = parentEntry ? [parentEntry, ...sorted] : sorted;
+
+    return { displayFiles: display, sortedDisplayFiles: sortedDisplay };
+  }, [connection, directoriesFirst, enableListView, filteredFiles, sortField, sortOrder]);
+
+  return { filteredFiles, displayFiles, sortedDisplayFiles };
+};

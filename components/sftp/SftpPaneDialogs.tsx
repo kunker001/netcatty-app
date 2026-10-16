@@ -1,0 +1,409 @@
+import React from "react";
+import { Loader2, Trash2 } from "lucide-react";
+import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import { getFileName, getParentPath } from "../../application/state/sftp/utils";
+import { SftpHostPicker } from "./SftpHostPicker";
+import type { Host } from "../../types";
+
+interface SftpPaneDialogsProps {
+  t: (key: string, params?: Record<string, unknown>) => string;
+  hostLabel?: string;
+  currentPath?: string;
+  // New folder
+  showNewFolderDialog: boolean;
+  setShowNewFolderDialog: (open: boolean) => void;
+  newFolderName: string;
+  setNewFolderName: (value: string) => void;
+  handleCreateFolder: () => void;
+  isCreating: boolean;
+  // New file
+  showNewFileDialog: boolean;
+  setShowNewFileDialog: (open: boolean) => void;
+  newFileName: string;
+  setNewFileName: (value: string) => void;
+  fileNameError: string | null;
+  setFileNameError: (value: string | null) => void;
+  handleCreateFile: () => void;
+  isCreatingFile: boolean;
+  // Overwrite confirm
+  showOverwriteConfirm: boolean;
+  setShowOverwriteConfirm: (open: boolean) => void;
+  overwriteTarget: string | null;
+  handleOverwriteConfirm: () => void;
+  // Rename
+  showRenameDialog: boolean;
+  setShowRenameDialog: (open: boolean) => void;
+  renameName: string;
+  setRenameName: (value: string) => void;
+  handleRename: () => void;
+  isRenaming: boolean;
+  // Delete
+  showDeleteConfirm: boolean;
+  setShowDeleteConfirm: (open: boolean) => void;
+  deleteTargets: string[];
+  deleteError?: string | null;
+  handleDelete: () => void;
+  isDeleting: boolean;
+  // Host picker (connected view)
+  showHostPicker: boolean;
+  setShowHostPicker: (open: boolean) => void;
+  hosts: Host[];
+  connectedHosts?: import("../../domain/sftpConnectedHosts").SftpConnectedHostEntry[];
+  side: "left" | "right";
+  hostSearch: string;
+  setHostSearch: (value: string) => void;
+  onConnect: (
+    host: Host | "local",
+    options?: { sourceSessionId?: string },
+  ) => void;
+  onDisconnect: () => Promise<boolean>;
+}
+
+const HostHint: React.FC<{ label?: string }> = ({ label }) =>
+  label ? (
+    <div className="text-xs text-muted-foreground truncate mb-1">{label}</div>
+  ) : null;
+
+export const SftpPaneDialogs: React.FC<SftpPaneDialogsProps> = ({
+  t,
+  hostLabel,
+  currentPath,
+  showNewFolderDialog,
+  setShowNewFolderDialog,
+  newFolderName,
+  setNewFolderName,
+  handleCreateFolder,
+  isCreating,
+  showNewFileDialog,
+  setShowNewFileDialog,
+  newFileName,
+  setNewFileName,
+  fileNameError,
+  setFileNameError,
+  handleCreateFile,
+  isCreatingFile,
+  showOverwriteConfirm,
+  setShowOverwriteConfirm,
+  overwriteTarget,
+  handleOverwriteConfirm,
+  showRenameDialog,
+  setShowRenameDialog,
+  renameName,
+  setRenameName,
+  handleRename,
+  isRenaming,
+  showDeleteConfirm,
+  setShowDeleteConfirm,
+  deleteTargets,
+  deleteError,
+  handleDelete,
+  isDeleting,
+  showHostPicker,
+  setShowHostPicker,
+  hosts,
+  connectedHosts = [],
+  side,
+  hostSearch,
+  setHostSearch,
+  onConnect,
+  onDisconnect,
+}) => {
+  // Focus the confirm button when a confirmation dialog opens so Enter confirms it.
+  // These dialogs are opened from a context menu, whose focus-return can otherwise
+  // leave focus outside the dialog, making Enter do nothing.
+  const deleteConfirmButtonRef = React.useRef<HTMLButtonElement>(null);
+  const overwriteConfirmButtonRef = React.useRef<HTMLButtonElement>(null);
+  const isSingleDeleteTarget = deleteTargets.length === 1;
+  const deletePath = (() => {
+    if (isSingleDeleteTarget) {
+      return deleteTargets[0];
+    }
+
+    const uniquePaths = Array.from(new Set(deleteTargets.map((target) => getParentPath(target)).filter(Boolean)));
+    if (uniquePaths.length === 1) return uniquePaths[0];
+    if (uniquePaths.length > 1) return "Multiple locations";
+    return currentPath;
+  })();
+  const showDeleteList = deleteTargets.length > 1;
+  const deleteListItems = (() => {
+    if (!showDeleteList) return [];
+
+    const uniquePaths = Array.from(new Set(deleteTargets.map((target) => getParentPath(target)).filter(Boolean)));
+    if (uniquePaths.length === 1) {
+      return deleteTargets.map((target) => getFileName(target) || target);
+    }
+    return deleteTargets;
+  })();
+
+  return (
+  <>
+    {/* Dialogs */}
+    <Dialog open={showNewFolderDialog} onOpenChange={setShowNewFolderDialog}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <HostHint label={hostLabel} />
+          <DialogTitle>{t("sftp.newFolder")}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label>{t("sftp.folderName")}</Label>
+            <Input
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              placeholder={t("sftp.folderName.placeholder")}
+              onKeyDown={(e) => e.key === "Enter" && handleCreateFolder()}
+              autoFocus
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => setShowNewFolderDialog(false)}
+          >
+            {t("common.cancel")}
+          </Button>
+          <Button
+            onClick={handleCreateFolder}
+            disabled={!newFolderName.trim() || isCreating}
+          >
+            {isCreating && (
+              <Loader2 size={14} className="mr-2 animate-spin" />
+            )}
+            {t("common.create")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog open={showNewFileDialog} onOpenChange={(open) => {
+      setShowNewFileDialog(open);
+      if (!open) {
+        setFileNameError(null);
+      }
+    }}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <HostHint label={hostLabel} />
+          <DialogTitle>{t("sftp.newFile")}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label>{t("sftp.fileName")}</Label>
+            <Input
+              value={newFileName}
+              onChange={(e) => {
+                setNewFileName(e.target.value);
+                setFileNameError(null);
+              }}
+              placeholder={t("sftp.fileName.placeholder")}
+              onKeyDown={(e) => e.key === "Enter" && handleCreateFile()}
+              autoFocus
+            />
+            {fileNameError && (
+              <div className="text-xs text-destructive">{fileNameError}</div>
+            )}
+          </div>
+        </div>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => setShowNewFileDialog(false)}
+          >
+            {t("common.cancel")}
+          </Button>
+          <Button
+            onClick={handleCreateFile}
+            disabled={!newFileName.trim() || isCreatingFile}
+          >
+            {isCreatingFile && (
+              <Loader2 size={14} className="mr-2 animate-spin" />
+            )}
+            {t("common.create")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    {/* Overwrite Confirmation Dialog */}
+    <Dialog open={showOverwriteConfirm} onOpenChange={setShowOverwriteConfirm}>
+      <DialogContent
+        className="max-w-sm"
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          overwriteConfirmButtonRef.current?.focus();
+        }}
+      >
+        <DialogHeader>
+          <HostHint label={hostLabel} />
+          <DialogTitle>{t("sftp.overwrite.title")}</DialogTitle>
+          <DialogDescription>
+            {t("sftp.overwrite.desc", { name: overwriteTarget || "" })}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => setShowOverwriteConfirm(false)}
+          >
+            {t("common.cancel")}
+          </Button>
+          <Button
+            ref={overwriteConfirmButtonRef}
+            variant="destructive"
+            onClick={handleOverwriteConfirm}
+          >
+            {t("sftp.overwrite.confirm")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog open={showRenameDialog} onOpenChange={setShowRenameDialog}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <HostHint label={hostLabel} />
+          <DialogTitle>{t("sftp.rename.title")}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label>{t("sftp.rename.newName")}</Label>
+            <Input
+              value={renameName}
+              onChange={(e) => setRenameName(e.target.value)}
+              placeholder={t("sftp.rename.placeholder")}
+              onKeyDown={(e) => e.key === "Enter" && handleRename()}
+              autoFocus
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => setShowRenameDialog(false)}
+          >
+            {t("common.cancel")}
+          </Button>
+          <Button
+            onClick={handleRename}
+            disabled={!renameName.trim() || isRenaming}
+          >
+            {isRenaming && (
+              <Loader2 size={14} className="mr-2 animate-spin" />
+            )}
+            {t("common.rename")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+      <DialogContent
+        className="max-w-[calc(100vw-2rem)] overflow-hidden sm:max-w-sm"
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          deleteConfirmButtonRef.current?.focus();
+        }}
+      >
+        <DialogHeader className="min-w-0 pr-6">
+          <DialogTitle className="truncate">
+            {t("sftp.deleteConfirm.title", { count: deleteTargets.length })}
+          </DialogTitle>
+          <DialogDescription className="break-words [overflow-wrap:anywhere]">
+            {t(showDeleteList ? "sftp.deleteConfirm.desc" : "sftp.deleteConfirm.descSingle")}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-w-0 space-y-3">
+          {hostLabel || deletePath ? (
+            <div className="min-w-0 space-y-1.5 text-xs text-muted-foreground">
+              {hostLabel ? (
+                <div className="flex min-w-0 items-start gap-2">
+                  <span className="font-medium text-foreground/80 shrink-0">{t("sftp.deleteConfirm.host")}:</span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">{hostLabel}</span>
+                </div>
+              ) : null}
+              {deletePath ? (
+                <div className="flex min-w-0 items-start gap-2">
+                  <span className="font-medium text-foreground/80 shrink-0">{t("sftp.deleteConfirm.path")}:</span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">{deletePath}</span>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {showDeleteList ? (
+            <div className="max-h-32 min-w-0 space-y-1 overflow-auto text-sm">
+              {deleteListItems.map((name) => (
+                <div
+                  key={name}
+                  className="flex min-w-0 items-center gap-2 text-muted-foreground"
+                >
+                  <Trash2 size={12} className="shrink-0" />
+                  <span className="min-w-0 truncate">{name}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {deleteError ? (
+            <p className="break-words text-xs text-destructive [overflow-wrap:anywhere]">
+              {deleteError}
+            </p>
+          ) : null}
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setShowDeleteConfirm(false)}
+            disabled={isDeleting}
+          >
+            {t("common.cancel")}
+          </Button>
+          <Button
+            ref={deleteConfirmButtonRef}
+            type="button"
+            variant="destructive"
+            onClick={handleDelete}
+            disabled={isDeleting}
+          >
+            {isDeleting && (
+              <Loader2 size={14} className="mr-2 animate-spin" />
+            )}
+            {t("action.delete")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <SftpHostPicker
+      open={showHostPicker}
+      onOpenChange={setShowHostPicker}
+      hosts={hosts}
+      connectedHosts={connectedHosts}
+      side={side}
+      hostSearch={hostSearch}
+      onHostSearchChange={setHostSearch}
+      onSelectLocal={async () => {
+        // Only connect to the new target if the disconnect actually happened.
+        // A cancel on the dirty-editor prompt must keep the user on the
+        // current host instead of silently switching and stranding tabs.
+        const ok = await onDisconnect();
+        if (ok) onConnect("local");
+      }}
+      onSelectHost={async (host, options) => {
+        const ok = await onDisconnect();
+        if (ok) onConnect(host, options);
+      }}
+    />
+  </>
+  );
+};

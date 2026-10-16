@@ -1,0 +1,1133 @@
+import {
+  Check,
+  ChevronDown,
+  Globe,
+  LayoutGrid,
+  List as ListIcon,
+  Loader2,
+  Play,
+  Server,
+  Shuffle,
+  Square,
+  Zap,
+} from "lucide-react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
+import { useI18n } from "../application/i18n/I18nProvider";
+import { usePortForwardingState } from "../application/state/usePortForwardingState";
+import { STORAGE_KEY_PORT_FORWARDING_PANEL_WIDTH } from "../infrastructure/config/storageKeys";
+import {
+  GroupConfig,
+  Host,
+  KnownHost,
+  ManagedSource,
+  PortForwardingRule,
+  PortForwardingType,
+  ProxyProfile,
+  SSHKey,
+} from "../domain/models";
+import { resolveGroupDefaults, applyGroupDefaults } from "../domain/groupConfig";
+import {
+  isPortForwardingRuleStartable,
+  isPortForwardingRuleStoppable,
+} from "../domain/portForwardingBulkActions";
+import { isPortForwardingAutoReconnectEnabled } from "../domain/portForwardingReconnect";
+import { materializeHostProxyProfile } from "../domain/proxyProfiles";
+import { cn } from "../lib/utils";
+import SelectHostPanel from "./SelectHostPanel";
+import {
+  AsidePanel,
+  AsidePanelContent,
+  AsidePanelFooter,
+} from "./ui/aside-panel";
+import { Button } from "./ui/button";
+import { Dropdown, DropdownContent, DropdownTrigger } from "./ui/dropdown";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
+import { SortDropdown } from "./ui/sort-dropdown";
+import { toast } from "./ui/toast";
+import {
+  VaultHeaderSearch,
+  VaultPageHeader,
+  vaultHeaderIconButtonClass,
+  vaultHeaderSecondaryButtonClass,
+  vaultSectionTitleClass,
+} from "./vault/VaultPageHeader";
+import { VaultDeleteConfirmDialog } from "./vault/VaultDeleteConfirmDialog";
+import { useVaultItemReorder } from "./vault/vaultReorderDrag";
+
+// Import components and utilities from port-forwarding module
+import {
+  EditPanel,
+  generateRuleLabel as buildRuleLabel,
+  getTypeMenuLabel,
+  NewFormPanel,
+  RuleCard,
+  stopRuntimeTunnelBeforeDelete,
+  WizardContent,
+} from "./port-forwarding";
+
+type WizardStep =
+  | "type"
+  | "local-config"
+  | "remote-host-selection"
+  | "remote-config"
+  | "destination"
+  | "host-selection"
+  | "label";
+
+interface PortForwardingProps {
+  hosts: Host[];
+  keys: SSHKey[];
+  identities?: import('../domain/models').Identity[];
+  customGroups: string[];
+  knownHosts?: KnownHost[];
+  managedSources?: ManagedSource[];
+  groupConfigs?: GroupConfig[];
+  proxyProfiles?: ProxyProfile[];
+  onNewHost?: () => void;
+  onSaveHost?: (host: Host) => void;
+  onCreateGroup?: (groupPath: string) => void;
+  terminalSettings?: { keepaliveInterval: number; keepaliveCountMax: number };
+}
+
+const PortForwarding: React.FC<PortForwardingProps> = ({
+  hosts,
+  keys,
+  identities = [],
+  customGroups: _customGroups,
+  knownHosts = [],
+  managedSources = [],
+  groupConfigs = [],
+  proxyProfiles = [],
+  onNewHost: _onNewHost,
+  onSaveHost,
+  onCreateGroup: _onCreateGroup,
+  terminalSettings,
+}) => {
+  const { t } = useI18n();
+  const portForwardingPanelResizeProps = {
+    resizable: true as const,
+    persistWidthStorageKey: STORAGE_KEY_PORT_FORWARDING_PANEL_WIDTH,
+    resizeAriaLabel: t("vault.panel.resizeWidth"),
+  };
+  const {
+    rules,
+    selectedRuleId,
+    viewMode,
+    sortMode,
+    search,
+    setSelectedRuleId,
+    setViewMode,
+    setSortMode,
+    setSearch,
+    addRule,
+    updateRule,
+    deleteRule,
+    duplicateRule,
+    reorderRule,
+    setRuleStatus,
+    startTunnel,
+    stopTunnel,
+    startAllTunnels,
+    stopAllTunnels,
+    hasRuntimeTunnel,
+    hasAnyRuntimeTunnel,
+    filteredRules,
+    selectedRule: _selectedRule,
+    preferFormMode,
+    setPreferFormMode,
+  } = usePortForwardingState();
+
+  // Track connecting/stopping states
+  const [pendingOperations, setPendingOperations] = useState<Set<string>>(
+    new Set(),
+  );
+  const [bulkAction, setBulkAction] = useState<"start" | "stop" | null>(null);
+  const proxyProfileIdSet = useMemo(
+    () => new Set(proxyProfiles.map((profile) => profile.id)),
+    [proxyProfiles],
+  );
+  const hostById = useMemo(
+    () => new Map(hosts.map((host) => [host.id, host])),
+    [hosts],
+  );
+  const ruleListRef = useRef<HTMLDivElement | null>(null);
+
+  const ruleReorder = useVaultItemReorder({
+    containerRef: ruleListRef,
+    viewMode,
+    dragType: "rule-id",
+    targetAttribute: "data-rule-id",
+    disabled: search.trim().length > 0,
+    onReorder: reorderRule,
+  });
+
+  const resolveEffectiveHost = useCallback(
+    (host: Host): Host => {
+      const withGroupDefaults = host.group
+        ? applyGroupDefaults(host, resolveGroupDefaults(host.group, groupConfigs, { validProxyProfileIds: proxyProfileIdSet }), { validProxyProfileIds: proxyProfileIdSet })
+        : applyGroupDefaults(host, {}, { validProxyProfileIds: proxyProfileIdSet });
+      return materializeHostProxyProfile(withGroupDefaults, proxyProfiles);
+    },
+    [groupConfigs, proxyProfileIdSet, proxyProfiles],
+  );
+
+  // Start a port forwarding tunnel
+  const handleStartTunnel = useCallback(
+    async (rule: PortForwardingRule) => {
+      if (bulkAction) return;
+      const _rawHost = hostById.get(rule.hostId);
+      if (!_rawHost) {
+        setRuleStatus(rule.id, "error", t("pf.error.hostNotFound"));
+        toast.error(
+          t("pf.error.hostNotFound"),
+          t("pf.toast.titleWithLabel", { label: rule.label }),
+        );
+        return;
+      }
+
+      const _host = resolveEffectiveHost(_rawHost);
+      const effectiveHosts = hosts.map((host) => resolveEffectiveHost(host));
+
+      setPendingOperations((prev) => new Set([...prev, rule.id]));
+      let errorShown = false;
+
+      try {
+        const result = await startTunnel(
+          rule,
+          _host,
+          effectiveHosts,
+          keys,
+          identities,
+          (status, error) => {
+            // Show toast on error (only once)
+            if (status === "error" && error && !errorShown) {
+              errorShown = true;
+              toast.error(
+                error,
+                t("pf.toast.titleWithLabel", { label: rule.label }),
+              );
+            }
+          },
+          isPortForwardingAutoReconnectEnabled(rule), // Enable reconnect for auto-reconnect rules (auto-start implies reconnect)
+          terminalSettings,
+          knownHosts,
+        );
+        // Show error from result only if not already shown
+        if (!result.success && result.error && !errorShown) {
+          errorShown = true;
+          toast.error(
+            result.error,
+            t("pf.toast.titleWithLabel", { label: rule.label }),
+          );
+        }
+      } finally {
+        setPendingOperations((prev) => {
+          const next = new Set(prev);
+          next.delete(rule.id);
+          return next;
+        });
+      }
+    },
+    [bulkAction, hostById, hosts, identities, keys, knownHosts, resolveEffectiveHost, setRuleStatus, startTunnel, t, terminalSettings],
+  );
+
+  // Stop a port forwarding tunnel
+  const handleStopTunnel = useCallback(
+    async (rule: PortForwardingRule) => {
+      if (bulkAction) return;
+      setPendingOperations((prev) => new Set([...prev, rule.id]));
+
+      try {
+        const result = await stopTunnel(rule.id);
+        if (!result.success && result.error) {
+          toast.error(
+            result.error,
+            t("pf.toast.titleWithLabel", { label: rule.label }),
+          );
+        }
+      } finally {
+        setPendingOperations((prev) => {
+          const next = new Set(prev);
+          next.delete(rule.id);
+          return next;
+        });
+      }
+    },
+    [bulkAction, stopTunnel, t],
+  );
+
+  const startableRules = useMemo(
+    () => rules.filter((rule) => isPortForwardingRuleStartable(rule, hasRuntimeTunnel(rule.id))),
+    [hasRuntimeTunnel, rules],
+  );
+  const stoppableRules = useMemo(
+    () => rules.filter((rule) => isPortForwardingRuleStoppable(rule, hasRuntimeTunnel(rule.id))),
+    [hasRuntimeTunnel, rules],
+  );
+  const hasAnyStoppableRuntime = hasAnyRuntimeTunnel();
+
+  const handleStartAll = useCallback(async () => {
+    if (bulkAction || startableRules.length === 0) return;
+    setBulkAction("start");
+    setPendingOperations((prev) => {
+      const next = new Set(prev);
+      for (const rule of startableRules) next.add(rule.id);
+      return next;
+    });
+    try {
+      const effectiveHosts = hosts.map((host) => resolveEffectiveHost(host));
+      const result = await startAllTunnels(
+        rules,
+        (rule) => {
+          const rawHost = rule.hostId ? hostById.get(rule.hostId) : undefined;
+          return rawHost ? resolveEffectiveHost(rawHost) : undefined;
+        },
+        effectiveHosts,
+        keys,
+        identities,
+        terminalSettings,
+        knownHosts,
+        t("pf.error.hostNotFound"),
+      );
+      if (result.failed > 0 && result.started > 0) {
+        toast.warning(
+          t("pf.toast.startAll.partial", { started: result.started, failed: result.failed }),
+          t("pf.action.startAll"),
+        );
+      } else if (result.failed > 0) {
+        toast.error(
+          t("pf.toast.startAll.failed", { count: result.failed }),
+          t("pf.action.startAll"),
+        );
+      } else if (result.started > 0) {
+        toast.success(
+          t("pf.toast.startAll.success", { count: result.started }),
+          t("pf.action.startAll"),
+        );
+      }
+    } finally {
+      setPendingOperations((prev) => {
+        const next = new Set(prev);
+        for (const rule of startableRules) next.delete(rule.id);
+        return next;
+      });
+      setBulkAction(null);
+    }
+  }, [
+    bulkAction,
+    hostById,
+    hosts,
+    identities,
+    keys,
+    knownHosts,
+    resolveEffectiveHost,
+    rules,
+    startAllTunnels,
+    startableRules,
+    t,
+    terminalSettings,
+  ]);
+
+  const handleStopAll = useCallback(async () => {
+    if (bulkAction || (stoppableRules.length === 0 && !hasAnyRuntimeTunnel())) return;
+    setBulkAction("stop");
+    setPendingOperations((prev) => {
+      const next = new Set(prev);
+      for (const rule of stoppableRules) next.add(rule.id);
+      return next;
+    });
+    try {
+      const result = await stopAllTunnels(rules);
+      if (result.failed > 0 && result.stopped > 0) {
+        toast.warning(
+          t("pf.toast.stopAll.partial", { stopped: result.stopped, failed: result.failed }),
+          t("pf.action.stopAll"),
+        );
+      } else if (result.failed > 0) {
+        toast.error(
+          t("pf.toast.stopAll.failed", { count: result.failed }),
+          t("pf.action.stopAll"),
+        );
+      } else if (result.stopped > 0) {
+        toast.success(
+          t("pf.toast.stopAll.success", { count: result.stopped }),
+          t("pf.action.stopAll"),
+        );
+      }
+    } finally {
+      setPendingOperations((prev) => {
+        const next = new Set(prev);
+        for (const rule of stoppableRules) next.delete(rule.id);
+        return next;
+      });
+      setBulkAction(null);
+    }
+  }, [bulkAction, hasAnyRuntimeTunnel, rules, stopAllTunnels, stoppableRules, t]);
+
+  // Wizard state
+  const [showWizard, setShowWizard] = useState(false);
+  const [wizardStep, setWizardStep] = useState<WizardStep>("type");
+  const [wizardType, setWizardType] = useState<PortForwardingType>("local");
+  const [draftRule, setDraftRule] = useState<Partial<PortForwardingRule>>({
+    label: "",
+    type: "local",
+    localPort: undefined,
+    bindAddress: "127.0.0.1",
+    remoteHost: "",
+    remotePort: undefined,
+    hostId: undefined,
+  });
+  const [isEditing, setIsEditing] = useState(false);
+  const [showHostSelector, setShowHostSelector] = useState(false);
+
+  // Edit panel state (separate from wizard)
+  const [showEditPanel, setShowEditPanel] = useState(false);
+  const [editingRule, setEditingRule] = useState<PortForwardingRule | null>(
+    null,
+  );
+  const [editDraft, setEditDraft] = useState<Partial<PortForwardingRule>>({});
+
+  // New forwarding form mode (skip wizard, all-in-one form)
+  const [showNewForm, setShowNewForm] = useState(false);
+  const [newFormDraft, setNewFormDraft] = useState<Partial<PortForwardingRule>>(
+    {
+      label: "",
+      type: "local",
+      localPort: undefined,
+      bindAddress: "127.0.0.1",
+      remoteHost: "",
+      remotePort: undefined,
+      hostId: undefined,
+    },
+  );
+
+  // New forwarding menu
+  const [showNewMenu, setShowNewMenu] = useState(false);
+
+  // Delete confirmation dialog state for active tunnels
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [ruleToDelete, setRuleToDelete] = useState<PortForwardingRule | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // Reset wizard
+  const resetWizard = () => {
+    setWizardStep("type");
+    setWizardType("local");
+    setDraftRule({
+      label: "",
+      type: "local",
+      localPort: undefined,
+      bindAddress: "127.0.0.1",
+      remoteHost: "",
+      remotePort: undefined,
+      hostId: undefined,
+    });
+    setIsEditing(false);
+  };
+
+  // Reset new form
+  const resetNewForm = () => {
+    setNewFormDraft({
+      label: "",
+      type: "local",
+      localPort: undefined,
+      bindAddress: "127.0.0.1",
+      remoteHost: "",
+      remotePort: undefined,
+      hostId: undefined,
+    });
+  };
+
+  // Start new rule - wizard or form based on user preference
+  const startNewRule = (type: PortForwardingType) => {
+    setShowNewMenu(false);
+    // The new-rule flow replaces an open editor; never leave both side panels mounted.
+    setShowEditPanel(false);
+    setEditingRule(null);
+    setEditDraft({});
+    setSelectedRuleId(null);
+    setShowHostSelector(false);
+
+    if (preferFormMode) {
+      // Form mode: show all-in-one form
+      resetNewForm();
+      setNewFormDraft((prev) => ({ ...prev, type }));
+      setShowNewForm(true);
+      setShowWizard(false);
+    } else {
+      // Wizard mode
+      resetWizard();
+      setWizardType(type);
+      setDraftRule((prev) => ({ ...prev, type }));
+      setShowWizard(true);
+      setShowNewForm(false);
+      setWizardStep("type");
+    }
+  };
+
+  // Skip wizard and switch to form mode
+  const skipWizardToForm = () => {
+    // Save preference
+    setPreferFormMode(true);
+
+    // Transfer current draft to form
+    setNewFormDraft({
+      ...draftRule,
+      type: wizardType,
+    });
+    setShowWizard(false);
+    setShowNewForm(true);
+  };
+
+  // Open wizard from form
+  const openWizardFromForm = () => {
+    // User opens wizard - prefer wizard mode next time
+    setPreferFormMode(false);
+
+    // Transfer current form draft to wizard
+    setWizardType(newFormDraft.type || "local");
+    setDraftRule({ ...newFormDraft });
+    setShowNewForm(false);
+    setShowWizard(true);
+    setWizardStep("type");
+  };
+
+  // Save new rule from form
+  const saveNewFormRule = () => {
+    const label =
+      newFormDraft.label?.trim() ||
+      (() => {
+        switch (newFormDraft.type) {
+          case "local":
+            return `Local:${newFormDraft.localPort} → ${newFormDraft.remoteHost}:${newFormDraft.remotePort}`;
+          case "remote":
+            return `Remote:${newFormDraft.localPort} → ${newFormDraft.remoteHost}:${newFormDraft.remotePort}`;
+          case "dynamic":
+            return `SOCKS:${newFormDraft.localPort}`;
+          default:
+            return "New Rule";
+        }
+      })();
+
+    addRule({
+      label,
+      type: newFormDraft.type || "local",
+      localPort: newFormDraft.localPort!,
+      bindAddress: newFormDraft.bindAddress || "127.0.0.1",
+      remoteHost: newFormDraft.remoteHost,
+      remotePort: newFormDraft.remotePort,
+      hostId: newFormDraft.hostId,
+      autoStart: newFormDraft.autoStart ?? false,
+      autoReconnect: isPortForwardingAutoReconnectEnabled(newFormDraft),
+    });
+
+    setShowNewForm(false);
+    resetNewForm();
+  };
+
+  // Close new form
+  const closeNewForm = () => {
+    setShowNewForm(false);
+    resetNewForm();
+  };
+
+  // Check if new form is valid
+  const isNewFormValid = (): boolean => {
+    if (
+      !newFormDraft.localPort ||
+      newFormDraft.localPort <= 0 ||
+      newFormDraft.localPort >= 65536
+    )
+      return false;
+    if (!newFormDraft.hostId) return false;
+    if (newFormDraft.type !== "dynamic") {
+      if (!newFormDraft.remoteHost || !newFormDraft.remotePort) return false;
+    }
+    return true;
+  };
+
+  // Edit existing rule - open edit panel
+  const startEditRule = (rule: PortForwardingRule) => {
+    setEditingRule(rule);
+    setEditDraft({ ...rule });
+    setShowEditPanel(true);
+    setShowWizard(false);
+    setShowNewForm(false);
+  };
+
+  // Save edited rule
+  const saveEditedRule = () => {
+    if (editingRule && editDraft.id) {
+      updateRule(editDraft.id, editDraft);
+      setShowEditPanel(false);
+      setEditingRule(null);
+      setEditDraft({});
+    }
+  };
+
+  // Close edit panel
+  const closeEditPanel = useCallback(() => {
+    setShowEditPanel(false);
+    setEditingRule(null);
+    setEditDraft({});
+    setSelectedRuleId(null);
+  }, [setSelectedRuleId]);
+
+  // Handle delete with confirmation
+  const handleDeleteRule = useCallback(
+    (rule: PortForwardingRule) => {
+      setRuleToDelete(rule);
+      setShowDeleteConfirm(true);
+    },
+    [],
+  );
+
+  // Confirm delete; active tunnels are stopped first.
+  const confirmDeleteRule = useCallback(async () => {
+    if (!ruleToDelete) return;
+
+    setIsDeleting(true);
+    try {
+      const stopped = await stopRuntimeTunnelBeforeDelete(
+        ruleToDelete.id,
+        stopTunnel,
+      );
+      if (!stopped) return;
+      if (editingRule?.id === ruleToDelete.id) {
+        closeEditPanel();
+      }
+      deleteRule(ruleToDelete.id);
+    } finally {
+      setIsDeleting(false);
+      setShowDeleteConfirm(false);
+      setRuleToDelete(null);
+    }
+  }, [ruleToDelete, stopTunnel, deleteRule, editingRule, closeEditPanel]);
+
+  const deleteTargetIsActive = Boolean(
+    ruleToDelete && hasRuntimeTunnel(ruleToDelete.id),
+  );
+
+  // Handle wizard navigation
+  // Flow for local: type -> local-config -> destination -> host-selection
+  // Flow for remote: type -> remote-host-selection (select host first) -> remote-config (port on remote) -> destination -> label
+  // Flow for dynamic: type -> local-config -> host-selection
+  const getNextStep = (): WizardStep | null => {
+    switch (wizardStep) {
+      case "type":
+        if (wizardType === "dynamic") return "local-config";
+        if (wizardType === "local") return "local-config";
+        if (wizardType === "remote") return "remote-host-selection";
+        return null;
+      case "local-config":
+        if (wizardType === "dynamic") return "host-selection";
+        if (wizardType === "local") return "destination";
+        return null;
+      case "remote-host-selection":
+        return "remote-config";
+      case "remote-config":
+        return "destination";
+      case "destination":
+        if (wizardType === "remote") return "label";
+        return "host-selection"; // Host selection is last for local
+      case "host-selection":
+        return null;
+      case "label":
+        return null;
+      default:
+        return null;
+    }
+  };
+
+  const getPrevStep = (): WizardStep | null => {
+    switch (wizardStep) {
+      case "type":
+        return null;
+      case "local-config":
+        return "type";
+      case "remote-host-selection":
+        return "type";
+      case "remote-config":
+        return "remote-host-selection";
+      case "destination":
+        if (wizardType === "local") return "local-config";
+        if (wizardType === "remote") return "remote-config";
+        return null;
+      case "host-selection":
+        if (wizardType === "dynamic") return "local-config";
+        return "destination";
+      case "label":
+        return "destination";
+      default:
+        return null;
+    }
+  };
+
+  const canProceed = (): boolean => {
+    switch (wizardStep) {
+      case "type":
+        // Type step just shows description, always can proceed
+        return true;
+      case "local-config":
+        return !!(
+          draftRule.localPort &&
+          draftRule.localPort > 0 &&
+          draftRule.localPort < 65536
+        );
+      case "remote-host-selection":
+        return !!draftRule.hostId;
+      case "remote-config":
+        return !!(
+          draftRule.localPort &&
+          draftRule.localPort > 0 &&
+          draftRule.localPort < 65536
+        );
+      case "destination":
+        return !!(
+          draftRule.remoteHost &&
+          draftRule.remotePort &&
+          draftRule.remotePort > 0
+        );
+      case "host-selection":
+        return !!draftRule.hostId;
+      case "label":
+        return true; // Label is optional
+      default:
+        return false;
+    }
+  };
+
+  const isLastStep = (): boolean => {
+    return getNextStep() === null;
+  };
+
+  // Save rule
+  const saveRule = () => {
+    // Generate label if not provided
+    const label = draftRule.label?.trim() || generateRuleLabel();
+
+    if (isEditing && draftRule.id) {
+      updateRule(draftRule.id, { ...draftRule, label });
+    } else {
+      addRule({
+        label,
+        type: wizardType,
+        localPort: draftRule.localPort!,
+        bindAddress: draftRule.bindAddress || "127.0.0.1",
+        remoteHost: draftRule.remoteHost,
+        remotePort: draftRule.remotePort,
+        hostId: draftRule.hostId,
+        autoStart: draftRule.autoStart ?? false,
+        autoReconnect: isPortForwardingAutoReconnectEnabled(draftRule),
+      });
+    }
+
+    setShowWizard(false);
+    resetWizard();
+  };
+
+  const generateRuleLabel = (): string => {
+    return buildRuleLabel(
+      wizardType,
+      draftRule.localPort,
+      draftRule.remoteHost,
+      draftRule.remotePort,
+    );
+  };
+
+  // Render wizard panel content
+  const hasRules = filteredRules.length > 0;
+
+  return (
+    <div className="flex h-full relative">
+      {/* Main Content */}
+      <div
+        className={cn(
+          "flex-1 min-w-0 flex flex-col min-h-0",
+        )}
+      >
+        <VaultPageHeader className="z-20">
+          <Dropdown open={showNewMenu} onOpenChange={setShowNewMenu}>
+            <DropdownTrigger asChild>
+              <Button
+                variant="secondary"
+                className={vaultHeaderSecondaryButtonClass}
+              >
+                <Zap size={14} />
+                {t("pf.action.newForwarding")}
+                <ChevronDown
+                  size={14}
+                  className={cn(
+                    "transition-transform",
+                    showNewMenu ? "rotate-180" : "",
+                  )}
+                />
+              </Button>
+            </DropdownTrigger>
+            <DropdownContent className="w-max flex flex-col" align="start" sideOffset={8}>
+              <Button
+                variant="ghost"
+                className="justify-start gap-3 h-10 px-3 whitespace-nowrap"
+                onClick={() => startNewRule("local")}
+              >
+                <Globe size={16} className="text-blue-500" />
+                {getTypeMenuLabel(t, "local")}
+              </Button>
+              <Button
+                variant="ghost"
+                className="justify-start gap-3 h-10 px-3 whitespace-nowrap"
+                onClick={() => startNewRule("remote")}
+              >
+                <Server size={16} className="text-orange-500" />
+                {getTypeMenuLabel(t, "remote")}
+              </Button>
+              <Button
+                variant="ghost"
+                className="justify-start gap-3 h-10 px-3 whitespace-nowrap"
+                onClick={() => startNewRule("dynamic")}
+              >
+                <Shuffle size={16} className="text-purple-500" />
+                {getTypeMenuLabel(t, "dynamic")}
+              </Button>
+            </DropdownContent>
+          </Dropdown>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="secondary"
+                className={vaultHeaderSecondaryButtonClass}
+                onClick={() => { void handleStartAll(); }}
+                disabled={bulkAction !== null || startableRules.length === 0}
+                aria-label={t("pf.action.startAll")}
+              >
+                {bulkAction === "start" ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Play size={14} />
+                )}
+                {t("pf.action.startAll")}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("pf.action.startAll")}</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="secondary"
+                className={vaultHeaderSecondaryButtonClass}
+                onClick={() => { void handleStopAll(); }}
+                disabled={bulkAction !== null || (stoppableRules.length === 0 && !hasAnyStoppableRuntime)}
+                aria-label={t("pf.action.stopAll")}
+              >
+                {bulkAction === "stop" ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Square size={14} />
+                )}
+                {t("pf.action.stopAll")}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("pf.action.stopAll")}</TooltipContent>
+          </Tooltip>
+
+          <div className="ml-auto flex items-center gap-2">
+            <VaultHeaderSearch
+              placeholder={t("common.searchPlaceholder")}
+              className="w-64"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+
+            {/* View mode toggle */}
+            <Dropdown>
+              <DropdownTrigger asChild>
+                <Button variant="ghost" size="icon" className={vaultHeaderIconButtonClass}>
+                  {viewMode === "grid" ? (
+                    <LayoutGrid size={16} />
+                  ) : (
+                    <ListIcon size={16} />
+                  )}
+                  <ChevronDown size={10} className="ml-0.5" />
+                </Button>
+              </DropdownTrigger>
+              <DropdownContent className="w-32" align="end">
+                <Button
+                  variant={viewMode === "grid" ? "secondary" : "ghost"}
+                  className="w-full justify-start gap-2 h-9"
+                  onClick={() => setViewMode("grid")}
+                >
+                  <LayoutGrid size={14} /> {t("pf.view.grid")}
+                  {viewMode === "grid" && (
+                    <Check size={12} className="ml-auto" />
+                  )}
+                </Button>
+                <Button
+                  variant={viewMode === "list" ? "secondary" : "ghost"}
+                  className="w-full justify-start gap-2 h-9"
+                  onClick={() => setViewMode("list")}
+                >
+                  <ListIcon size={14} /> {t("pf.view.list")}
+                  {viewMode === "list" && (
+                    <Check size={12} className="ml-auto" />
+                  )}
+                </Button>
+              </DropdownContent>
+            </Dropdown>
+
+            {/* Sort mode toggle */}
+            <SortDropdown
+              value={sortMode}
+              onChange={(mode) => {
+                if (mode !== "group" && mode !== "ip") setSortMode(mode);
+              }}
+              modes={["manual", "az", "za", "newest", "oldest"]}
+              className={vaultHeaderIconButtonClass}
+            />
+          </div>
+        </VaultPageHeader>
+
+        {/* Rules List */}
+        <div className="flex-1 overflow-y-auto">
+          {!hasRules ? (
+            <div className="flex h-full flex-col items-center justify-center p-3 text-muted-foreground">
+              <div className="h-16 w-16 rounded-2xl bg-secondary/80 flex items-center justify-center mb-4">
+                <Zap size={32} className="opacity-60" />
+              </div>
+              <h3 className="text-lg font-semibold text-foreground mb-2">
+                {t("pf.empty.title")}
+              </h3>
+              <p className="text-sm text-center max-w-sm">
+                {t("pf.empty.desc")}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3 p-3">
+              <div className="flex items-center justify-between">
+                <h2 className={vaultSectionTitleClass}>{t("pf.title")}</h2>
+                <span className="text-xs text-muted-foreground">
+                  {t("pf.rulesCount", { count: filteredRules.length })}
+                </span>
+              </div>
+
+              <div
+                ref={ruleListRef}
+                className={cn(
+                  viewMode === "grid"
+                    ? "grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-3"
+                    : "flex flex-col gap-2.5",
+                )}
+                onDragOverCapture={ruleReorder.handleDragOverCapture}
+                onDragOver={ruleReorder.handleDragOver}
+                onDropCapture={ruleReorder.handleDropCapture}
+                onDragEndCapture={ruleReorder.handleDragEndCapture}
+              >
+                {filteredRules.map((rule) => (
+                  <RuleCard
+                    key={rule.id}
+                    rule={rule}
+                    host={hostById.get(rule.hostId)}
+                    viewMode={viewMode}
+                    isSelected={selectedRuleId === rule.id}
+                    isPending={pendingOperations.has(rule.id)}
+                    canStop={hasRuntimeTunnel(rule.id)}
+                    reorderProps={ruleReorder.getItemReorderProps(rule.id, `rule:${rule.id}`)}
+                    onSelect={() => {
+                      setSelectedRuleId(rule.id);
+                      startEditRule(rule);
+                    }}
+                    onEdit={() => startEditRule(rule)}
+                    onDuplicate={() => duplicateRule(rule.id)}
+                    onDelete={() => handleDeleteRule(rule)}
+                    onStart={() => handleStartTunnel(rule)}
+                    onStop={() => handleStopTunnel(rule)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Edit Panel - shown when a rule is selected */}
+      {showEditPanel && editingRule && !showHostSelector && (
+        <EditPanel
+          rule={editingRule}
+          draft={editDraft}
+          hosts={hosts}
+          onDraftChange={(updates) =>
+            setEditDraft((prev) => ({ ...prev, ...updates }))
+          }
+          onSave={saveEditedRule}
+          onClose={closeEditPanel}
+          onDuplicate={() => {
+            duplicateRule(editingRule.id);
+            closeEditPanel();
+          }}
+          onDelete={() => handleDeleteRule(editingRule)}
+          onOpenHostSelector={() => setShowHostSelector(true)}
+          {...portForwardingPanelResizeProps}
+        />
+      )}
+
+      {/* Wizard Panel */}
+      {showWizard && !showHostSelector && (
+        <AsidePanel
+          open={true}
+          onClose={() => {
+            setShowWizard(false);
+            resetWizard();
+          }}
+          title={isEditing ? t("pf.wizard.editTitle") : t("pf.wizard.newTitle")}
+          width="w-[360px]"
+          layout="inline"
+          {...portForwardingPanelResizeProps}
+          showBackButton={!!getPrevStep()}
+          onBack={
+            getPrevStep()
+              ? () => {
+                const prev = getPrevStep();
+                if (prev) setWizardStep(prev);
+              }
+              : undefined
+          }
+        >
+          <AsidePanelContent>
+            <WizardContent
+              step={wizardStep}
+              type={wizardType}
+              draft={draftRule}
+              hosts={hosts}
+              onTypeChange={(type) => {
+                setWizardType(type);
+                setDraftRule((prev) => ({ ...prev, type }));
+              }}
+              onDraftChange={(updates) =>
+                setDraftRule((prev) => ({ ...prev, ...updates }))
+              }
+              onOpenHostSelector={() => setShowHostSelector(true)}
+            />
+          </AsidePanelContent>
+          <AsidePanelFooter className="space-y-2">
+            <Button
+              className="w-full h-10"
+              disabled={!canProceed()}
+              onClick={() => {
+                if (isLastStep()) {
+                  saveRule();
+                } else {
+                  const next = getNextStep();
+                  if (next) setWizardStep(next);
+                }
+              }}
+            >
+              {isLastStep()
+                ? isEditing
+                  ? t("pf.wizard.saveChanges")
+                  : t("pf.wizard.done")
+                : t("pf.wizard.continue")}
+            </Button>
+            <Button
+              variant="ghost"
+              className="w-full h-10 text-muted-foreground hover:text-foreground hover:bg-foreground/5"
+              onClick={() => {
+                if (isEditing) {
+                  setShowWizard(false);
+                  resetWizard();
+                } else {
+                  skipWizardToForm();
+                }
+              }}
+            >
+              {isEditing ? t("pf.wizard.cancel") : t("pf.wizard.skipWizard")}
+            </Button>
+          </AsidePanelFooter>
+        </AsidePanel>
+      )}
+
+      {/* Host Selector Overlay */}
+      {showHostSelector && (
+        <SelectHostPanel
+          hosts={hosts}
+          customGroups={_customGroups}
+          selectedHostIds={
+            showEditPanel
+              ? editDraft.hostId
+                ? [editDraft.hostId]
+                : []
+              : showNewForm
+                ? newFormDraft.hostId
+                  ? [newFormDraft.hostId]
+                  : []
+                : draftRule.hostId
+                  ? [draftRule.hostId]
+                  : []
+          }
+          multiSelect={false}
+          onSelect={(host) => {
+            if (showEditPanel) {
+              setEditDraft((prev) => ({ ...prev, hostId: host.id }));
+            } else if (showNewForm) {
+              setNewFormDraft((prev) => ({ ...prev, hostId: host.id }));
+            } else {
+              setDraftRule((prev) => ({ ...prev, hostId: host.id }));
+            }
+            setShowHostSelector(false);
+          }}
+          onBack={() => setShowHostSelector(false)}
+          onContinue={() => setShowHostSelector(false)}
+          availableKeys={keys}
+          identities={identities}
+          proxyProfiles={proxyProfiles}
+          managedSources={managedSources}
+          onSaveHost={onSaveHost}
+          onCreateGroup={_onCreateGroup}
+          width="w-[360px]"
+          layout="inline"
+          {...portForwardingPanelResizeProps}
+        />
+      )}
+
+      {/* New Form Panel (skip wizard mode) */}
+      {showNewForm && !showHostSelector && (
+        <NewFormPanel
+          draft={newFormDraft}
+          hosts={hosts}
+          onDraftChange={(updates) =>
+            setNewFormDraft((prev) => ({ ...prev, ...updates }))
+          }
+          onSave={saveNewFormRule}
+          onClose={closeNewForm}
+          onOpenHostSelector={() => setShowHostSelector(true)}
+          onOpenWizard={openWizardFromForm}
+          isValid={isNewFormValid()}
+          {...portForwardingPanelResizeProps}
+        />
+      )}
+
+      <VaultDeleteConfirmDialog
+        open={showDeleteConfirm}
+        title={t("vault.deleteConfirm.title", {
+          name: ruleToDelete?.label ?? "",
+        })}
+        description={
+          deleteTargetIsActive
+            ? t("pf.deleteActive.desc", { label: ruleToDelete?.label ?? "" })
+            : t("vault.deleteConfirm.portForwardingDesc")
+        }
+        confirmLabel={deleteTargetIsActive ? t("pf.deleteActive.confirm") : undefined}
+        disabled={isDeleting}
+        onOpenChange={(open) => {
+          setShowDeleteConfirm(open);
+          if (!open) setRuleToDelete(null);
+        }}
+        onConfirm={() => {
+          void confirmDeleteRule();
+        }}
+      />
+    </div>
+  );
+};
+
+export default PortForwarding;

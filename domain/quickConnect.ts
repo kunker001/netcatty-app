@@ -1,0 +1,362 @@
+export interface QuickConnectTarget {
+  hostname: string;
+  username?: string;
+  port?: number;
+  /** The @ separators in the address are part of a JumpServer login name. */
+  isJumpServerLogin?: true;
+}
+
+interface QuickConnectParseResult {
+  target: QuickConnectTarget | null;
+  warnings: string[];
+}
+
+/** Test whether a string looks like a bare (un-bracketed) IPv6 address.
+ *  Must have only hex digits and colons, with either:
+ *  - A "::" shorthand (unambiguously IPv6), or
+ *  - Exactly 7 colons (full 8-group notation like 2607:f130:0:179:0:0:b0df:eec4)
+ *  This avoids false positives on MAC addresses (6 groups, 5 colons). */
+const BARE_IPV6_RE = /^[a-fA-F0-9:]+$/;
+const isBareIPv6 = (s: string): boolean => {
+  if (!BARE_IPV6_RE.test(s)) return false;
+  if (s.includes('::')) return true;
+  return (s.match(/:/g) || []).length === 7;
+};
+
+const parseDirectTarget = (input: string): QuickConnectTarget | null => {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  // Pattern: [user@]hostname[:port]
+  // Hostname can be IP (v4 or v6 in brackets) or domain name
+  const regex = /^(?:([^@]+)@)?([^\s:]+|\[[^\]]+\])(?::(\d+))?$/;
+  const match = trimmed.match(regex);
+
+  // If the main regex fails, try bare IPv6: [user@]ipv6_address
+  // Bare IPv6 contains colons so the main regex can't distinguish host:port.
+  // Port must be specified via brackets: [ipv6]:port
+  if (!match) {
+    const bareIpv6Regex = /^(?:([^@]+)@)?([a-fA-F0-9:]+)$/;
+    const bareMatch = trimmed.match(bareIpv6Regex);
+    if (bareMatch) {
+      const [, bareUser, bareHost] = bareMatch;
+      if (isBareIPv6(bareHost)) {
+        return {
+          hostname: bareHost,
+          username: bareUser || undefined,
+          port: undefined,
+        };
+      }
+    }
+    return null;
+  }
+
+  const [, username, hostname, portStr] = match;
+
+  // Validate hostname looks like an IP or domain
+  const ipv4Regex = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+  const ipv6Regex = /^\[?[a-fA-F0-9:]+\]?$/;
+  const domainRegex =
+    /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/;
+
+  if (
+    !ipv4Regex.test(hostname) &&
+    !ipv6Regex.test(hostname) &&
+    !domainRegex.test(hostname)
+  ) {
+    return null;
+  }
+
+  const port = portStr ? parseInt(portStr, 10) : undefined;
+  if (port !== undefined && (isNaN(port) || port < 1 || port > 65535)) {
+    return null;
+  }
+
+  return {
+    hostname: hostname.replace(/^\[|\]$/g, ""), // Remove IPv6 brackets
+    username: username || undefined,
+    port,
+  };
+};
+
+/** Non-empty pieces of a JumpServer login name. */
+const USERNAME_SEGMENT_RE = /^[^\s@]+$/;
+
+const parseUsernameFromHostToken = (input: string): string | undefined => {
+  const segments = input.trim().split("@");
+  if (segments.length < 2 || segments.length > 4 || !segments[segments.length - 1]) {
+    return undefined;
+  }
+  const usernameSegments = segments.slice(0, -1);
+  return usernameSegments.every((segment) => USERNAME_SEGMENT_RE.test(segment))
+    ? usernameSegments.join("@")
+    : undefined;
+};
+
+/**
+ * JumpServer selects the asset from the SSH login name. OpenSSH connects to
+ * the final host and sends every preceding segment as one username, including
+ * the @ separators. This is a single SSH connection, not a ProxyJump chain.
+ */
+const parseJumpServerTarget = (input: string): QuickConnectTarget | null => {
+  const trimmed = input.trim();
+  const atCount = (trimmed.match(/@/g) || []).length;
+  if (atCount < 2 || atCount > 3) return null;
+
+  const segments = trimmed.split("@");
+  const host = parseDirectTarget(segments[segments.length - 1]);
+  const username = parseUsernameFromHostToken(trimmed);
+  if (!host || !username) return null;
+
+  return {
+    hostname: host.hostname,
+    username,
+    port: host.port,
+    isJumpServerLogin: true,
+  };
+};
+
+/** Parse a quick connect target, accepting JumpServer login names. */
+const parseTargetWithCompositeUser = (input: string): QuickConnectTarget | null =>
+  parseJumpServerTarget(input) ?? parseDirectTarget(input);
+
+const sshArgOptions = new Set([
+  "-b",
+  "-c",
+  "-D",
+  "-E",
+  "-F",
+  "-i",
+  "-I",
+  "-J",
+  "-L",
+  "-m",
+  "-O",
+  "-P",
+  "-R",
+  "-S",
+  "-W",
+  "-w",
+]);
+
+const parseSshOption = (
+  raw: string,
+  nextToken?: string,
+): { key: string; value: string; consumedNext: boolean } | null => {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const parts = trimmed.split("=");
+  if (parts.length >= 2) {
+    const key = parts[0]?.trim();
+    const value = parts.slice(1).join("=").trim();
+    if (key && value) {
+      return { key, value, consumedNext: false };
+    }
+  }
+
+  if (nextToken && !nextToken.startsWith("-")) {
+    return { key: trimmed, value: nextToken, consumedNext: true };
+  }
+
+  return null;
+};
+
+const parseSshCommand = (input: string): QuickConnectParseResult | null => {
+  const trimmed = input.trim();
+  if (!/^ssh(\s|$)/i.test(trimmed)) return null;
+
+  const tokens = trimmed.split(/\s+/);
+  if (tokens.length < 2) return null;
+
+  const warnings: string[] = [];
+  let username: string | undefined;
+  let optionUsername: string | undefined;
+  let port: number | undefined;
+  let optionPort: number | undefined;
+  let portInvalid = false;
+  let optionHostname: string | undefined;
+  let hostToken: string | undefined;
+
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (!token) continue;
+
+    if (token === "-p") {
+      const value = tokens[i + 1];
+      if (value) {
+        port = parseInt(value, 10);
+        if (Number.isNaN(port)) portInvalid = true;
+        i++;
+      }
+      continue;
+    }
+
+    if (token.startsWith("-p") && token.length > 2) {
+      const value = token.replace(/^-p=?/, "");
+      if (value) {
+        port = parseInt(value, 10);
+        if (Number.isNaN(port)) portInvalid = true;
+      }
+      continue;
+    }
+
+    if (token === "-l") {
+      const value = tokens[i + 1];
+      if (value) {
+        username = value;
+        i++;
+      }
+      continue;
+    }
+
+    if (token.startsWith("-l") && token.length > 2) {
+      const value = token.replace(/^-l=?/, "");
+      if (value) username = value;
+      continue;
+    }
+
+    if (token === "-o") {
+      const optionToken = tokens[i + 1];
+      if (optionToken) {
+        const nextToken = tokens[i + 2];
+        const parsed = parseSshOption(optionToken, nextToken);
+        if (parsed) {
+          const key = parsed.key.toLowerCase();
+          if (key === "port") {
+            const parsedPort = parseInt(parsed.value, 10);
+            if (Number.isNaN(parsedPort)) {
+              portInvalid = true;
+            } else {
+              optionPort = parsedPort;
+            }
+          } else if (key === "user") {
+            optionUsername = parsed.value;
+          } else if (key === "hostname") {
+            optionHostname = parsed.value;
+          } else {
+            warnings.push(`-o ${parsed.key}`);
+          }
+          i += parsed.consumedNext ? 2 : 1;
+          continue;
+        }
+        warnings.push("-o");
+        i++;
+      }
+      continue;
+    }
+
+    if (token.startsWith("-o") && token.length > 2) {
+      const parsed = parseSshOption(token.slice(2), tokens[i + 1]);
+      if (parsed) {
+        const key = parsed.key.toLowerCase();
+        if (key === "port") {
+          const parsedPort = parseInt(parsed.value, 10);
+          if (Number.isNaN(parsedPort)) {
+            portInvalid = true;
+          } else {
+            optionPort = parsedPort;
+          }
+        } else if (key === "user") {
+          optionUsername = parsed.value;
+        } else if (key === "hostname") {
+          optionHostname = parsed.value;
+        } else {
+          warnings.push(`-o ${parsed.key}`);
+        }
+        if (parsed.consumedNext) i++;
+        continue;
+      }
+      warnings.push("-o");
+    }
+
+    if (sshArgOptions.has(token)) {
+      warnings.push(token);
+      const next = tokens[i + 1];
+      if (next) i++;
+      continue;
+    }
+
+    if (token.startsWith("-")) {
+      warnings.push(token);
+      continue;
+    }
+
+    if (!hostToken) {
+      hostToken = token;
+    } else {
+      warnings.push(token);
+    }
+  }
+
+  if (!hostToken) return null;
+
+  const hostTokenTarget = parseTargetWithCompositeUser(hostToken);
+  const hostTokenAtCount = (hostToken.match(/@/g) || []).length;
+  const hasCompositeHostToken = hostTokenAtCount >= 2
+    && hostTokenAtCount <= 3
+    && Boolean(parseUsernameFromHostToken(hostToken));
+  const hostnameOverride = optionHostname ? parseDirectTarget(optionHostname) : null;
+  const base = optionHostname
+    ? hostnameOverride && {
+        ...hostnameOverride,
+        username: hostTokenTarget?.username
+          ?? parseUsernameFromHostToken(hostToken)
+          ?? hostnameOverride.username,
+        ...(hasCompositeHostToken ? { isJumpServerLogin: true as const } : {}),
+      }
+    : hostTokenTarget;
+  if (!base) return null;
+
+  if (portInvalid) return null;
+
+  const resolvedPort =
+    port !== undefined && !Number.isNaN(port)
+      ? port
+      : optionPort !== undefined && !Number.isNaN(optionPort)
+        ? optionPort
+        : base.port;
+  if (
+    resolvedPort !== undefined &&
+    (Number.isNaN(resolvedPort) || resolvedPort < 1 || resolvedPort > 65535)
+  ) {
+    return null;
+  }
+
+  return {
+    target: {
+      hostname: base.hostname,
+      username: optionUsername || username || base.username,
+      port: resolvedPort,
+      ...(base.isJumpServerLogin && !optionUsername && !username
+        ? { isJumpServerLogin: true as const }
+        : {}),
+    },
+    warnings: Array.from(new Set(warnings)),
+  };
+};
+
+// Parse user@host:port or ssh command formats with warning details
+export function parseQuickConnectInputWithWarnings(
+  input: string,
+): QuickConnectParseResult {
+  const trimmed = input.trim();
+  if (!trimmed) return { target: null, warnings: [] };
+
+  const sshTarget = parseSshCommand(trimmed);
+  if (sshTarget) return sshTarget;
+
+  return { target: parseTargetWithCompositeUser(trimmed), warnings: [] };
+}
+
+// Parse user@host:port or ssh command formats
+export function parseQuickConnectInput(
+  input: string,
+): QuickConnectTarget | null {
+  return parseQuickConnectInputWithWarnings(input).target;
+}
+
+// Check if input looks like a quick connect address
+export function isQuickConnectInput(input: string): boolean {
+  return parseQuickConnectInput(input) !== null;
+}
