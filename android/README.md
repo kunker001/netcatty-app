@@ -5,7 +5,7 @@
 - [简体中文](../README.zh-CN.md)
 - [English](../README.md)
 
-GitHub Actions 会在 `android/` 有改动时自动编译 debug APK，产物在对应 workflow 的 Artifacts 里。也可以在 Actions 里手动跑 **android**。
+GitHub Actions 会在推送 `v0.2.0` 这类版本 tag、或推到 `master` / `main` 时编译 debug APK。产物在对应 workflow 的 Artifacts 里，也可以在 Actions 里手动跑 **android**。
 
 这里只放本地构建命令。
 
