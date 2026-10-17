@@ -14,6 +14,13 @@ enum class LiveStatus {
     FAILED,
 }
 
+/** List/header status. A live transport wins over a stale failure reason. */
+fun LiveSession.listStatus(): LiveStatus = when {
+    session.connected -> if (status == LiveStatus.CONNECTING) LiveStatus.CONNECTING else LiveStatus.CONNECTED
+    status == LiveStatus.CONNECTING -> LiveStatus.CONNECTING
+    else -> LiveStatus.FAILED
+}
+
 data class LiveSession(
     val id: String,
     val spec: ConnectSpec,
@@ -33,6 +40,16 @@ class LiveSessionStore(
 
     fun start(spec: ConnectSpec): LiveSession {
         get(spec.connectionId)?.let { existing ->
+            if (existing.session.connected) {
+                if (existing.status != LiveStatus.CONNECTED) {
+                    _sessions.update { list ->
+                        list.map {
+                            if (it.id == existing.id) it.copy(status = LiveStatus.CONNECTED, error = null) else it
+                        }
+                    }
+                }
+                return get(spec.connectionId) ?: existing
+            }
             if (existing.status != LiveStatus.FAILED) return existing
             close(existing.id)
         }

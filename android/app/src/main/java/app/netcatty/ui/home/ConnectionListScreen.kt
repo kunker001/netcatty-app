@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import app.netcatty.ai.OpsExecution
 import app.netcatty.session.LiveSession
 import app.netcatty.session.LiveStatus
+import app.netcatty.session.listStatus
 import app.netcatty.ssh.HostPing
 import app.netcatty.ssh.HostPingMonitor
 import app.netcatty.ssh.HostStats
@@ -86,7 +87,7 @@ fun ConnectionListScreen(
 ) {
     LaunchedEffect(sessions) {
         while (true) {
-            val skip = sessions.filter { it.status == LiveStatus.CONNECTED }.map { it.spec.hostId }.toSet()
+            val skip = sessions.filter { it.listStatus() == LiveStatus.CONNECTED }.map { it.spec.hostId }.toSet()
             pingMonitor.refresh(sessions.map { it.spec }, skipHostIds = skip)
             delay(15_000)
         }
@@ -182,9 +183,10 @@ private fun LiveSessionCard(
     var menu by remember { mutableStateOf(false) }
     val quality = ping?.quality ?: NetQuality.UNKNOWN
     val netColor = quality.tint()
+    val shown = live.listStatus()
     val statusColor = when {
-        live.status == LiveStatus.FAILED -> StatusRed
-        live.status == LiveStatus.CONNECTING -> MidnightPrimary
+        shown == LiveStatus.FAILED -> StatusRed
+        shown == LiveStatus.CONNECTING -> MidnightPrimary
         ai != null -> if (ai.awaitingConfirm) StatusOrange else MidnightPrimary
         else -> when (quality) {
             NetQuality.GOOD -> StatusGreen
@@ -195,7 +197,7 @@ private fun LiveSessionCard(
     }
     val statusLabel = buildString {
         append(
-            when (live.status) {
+            when (shown) {
                 LiveStatus.CONNECTING -> "正在连接"
                 LiveStatus.CONNECTED -> "已连接"
                 LiveStatus.FAILED -> live.error?.let { "失败：$it" } ?: "连接失败"
@@ -263,7 +265,7 @@ private fun LiveSessionCard(
                     modifier = Modifier.padding(top = 2.dp),
                 )
             }
-            if (live.status == LiveStatus.CONNECTED) {
+            if (shown == LiveStatus.CONNECTED) {
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -285,7 +287,7 @@ private fun LiveSessionCard(
                 modifier = Modifier.padding(end = 4.dp),
             )
         }
-        if (live.status == LiveStatus.CONNECTED) {
+        if (shown == LiveStatus.CONNECTED) {
             Text(
                 ping?.label ?: "检测中",
                 color = netColor,
@@ -300,7 +302,7 @@ private fun LiveSessionCard(
             }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("打开终端") }, onClick = { menu = false; onOpen() })
-                if (live.status == LiveStatus.FAILED) {
+                if (shown == LiveStatus.FAILED) {
                     DropdownMenuItem(text = { Text("重试") }, onClick = { menu = false; onRetry() })
                 }
                 DropdownMenuItem(

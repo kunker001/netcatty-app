@@ -1,7 +1,6 @@
 package app.netcatty.ssh
 
 import app.netcatty.session.LiveSession
-import app.netcatty.session.LiveStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -34,7 +33,7 @@ class HostStatsMonitor {
     suspend fun refresh(sessions: List<LiveSession>) {
         if (!mutex.tryLock()) return
         try {
-            val connected = sessions.filter { it.status == LiveStatus.CONNECTED && it.session.connected }
+            val connected = sessions.filter { it.session.connected }
             val keep = sessions.map { it.id }.toSet()
             cpuPrev.keys.retainAll(keep)
             if (connected.isEmpty()) {

@@ -70,7 +70,6 @@ fun SafetySettings(
         }
     }
 
-    Text("安全", color = MidnightText, fontSize = 14.sp, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
     Text(
         "控制 Catty 通过 Netcatty 访问终端的方式。观察模式只读；确认模式会先询问；自动模式可直接执行，但仍受黑名单约束。",
         color = MidnightMuted,

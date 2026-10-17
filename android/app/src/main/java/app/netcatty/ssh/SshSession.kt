@@ -6,6 +6,7 @@ import java.io.InputStream
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,6 +34,8 @@ class SshSession(
     private val replay = StringBuilder()
     @Volatile private var output: ((String) -> Unit)? = null
     private var client: SSHClient? = null
+    private var probeClient: SSHClient? = null
+    private var targetSpec: ConnectSpec? = null
     private var session: SessionChannel? = null
     private var shell: Session.Shell? = null
     private var readerJob: Job? = null
@@ -52,15 +55,10 @@ class SshSession(
 
     fun connect(target: ConnectSpec) {
         if (!started.compareAndSet(false, true)) return
+        targetSpec = target
         scope.launch(Dispatchers.IO) {
             try {
-                val ssh = SshCrypto.client()
-                ssh.addHostKeyVerifier(AcceptThenRememberVerifier)
-                ssh.connectTimeout = 15_000
-                ssh.connect(target.hostname, target.port)
-                runCatching { ssh.connection.keepAlive.keepAliveInterval = 15 }
-                enableSocketKeepAlive(ssh)
-                authenticate(ssh, target)
+                val ssh = openClient(target)
                 val sess = ssh.startSession() as SessionChannel
                 sess.allocatePTY("xterm-256color", cols, rows, 0, 0, emptyMap())
                 val sh = sess.startShell()
@@ -98,7 +96,7 @@ class SshSession(
         synchronized(replay) {
             replay.append(chunk)
             if (replay.length > 200_000) replay.delete(0, replay.length - 160_000)
-            output?.invoke(chunk)
+            runCatching { output?.invoke(chunk) }
         }
     }
 
@@ -136,8 +134,13 @@ class SshSession(
 
     suspend fun exec(command: String, timeoutSeconds: Int = 60): ExecResult = withContext(Dispatchers.IO) {
         channelMutex.withLock {
-            val ssh = synchronized(lock) { client } ?: error("SSH is not connected")
-            if (closed.get() || !ssh.isConnected) error("SSH is not connected")
+            if (closed.get()) error("SSH is not connected")
+            val ssh = try {
+                ensureProbeClient()
+            } catch (error: Exception) {
+                closeProbe()
+                throw error
+            }
             var sess: Session? = null
             var cmd: Session.Command? = null
             try {
@@ -159,6 +162,10 @@ class SshSession(
                         timedOut = commandRef.exitStatus == null,
                     )
                 }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                closeProbe()
+                throw error
             } finally {
                 runCatching { cmd?.close() }
                 runCatching { sess?.close() }
@@ -265,22 +272,64 @@ class SshSession(
     private fun startReader(input: InputStream) {
         readerJob = scope.launch(Dispatchers.IO) {
             val buffer = ByteArray(32 * 1024)
+            var misses = 0
             try {
                 while (!closed.get()) {
-                    val read = input.read(buffer)
+                    val read = try {
+                        input.read(buffer)
+                    } catch (error: Exception) {
+                        if (error is CancellationException) throw error
+                        if (closed.get()) break
+                        val alive = synchronized(lock) { client?.isConnected == true }
+                        if (!alive) {
+                            if (closed.compareAndSet(false, true)) {
+                                onClosed(friendlySshError(error.message))
+                            }
+                            break
+                        }
+                        // A channel read can throw while the SSH transport is still up
+                        // (window adjust, a background exec racing the shell). That used
+                        // to mark the whole session failed and close a shell the user
+                        // could still open.
+                        misses += 1
+                        delay((200L * misses).coerceAtMost(2_000L))
+                        continue
+                    }
+                    misses = 0
                     if (read < 0) break
                     if (read == 0) continue
                     emit(String(buffer, 0, read, Charsets.UTF_8))
                 }
                 if (closed.compareAndSet(false, true)) onClosed(null)
-            } catch (error: Exception) {
-                if (closed.compareAndSet(false, true)) {
-                    onClosed(friendlySshError(error.message))
-                }
             } finally {
-                closeQuietly()
+                if (closed.get()) closeQuietly()
             }
         }
+    }
+
+    private fun openClient(target: ConnectSpec): SSHClient {
+        val ssh = SshCrypto.client()
+        ssh.addHostKeyVerifier(AcceptThenRememberVerifier)
+        ssh.connectTimeout = 15_000
+        ssh.connect(target.hostname, target.port)
+        enableSocketKeepAlive(ssh)
+        authenticate(ssh, target)
+        return ssh
+    }
+
+    private fun ensureProbeClient(): SSHClient {
+        val existing = probeClient
+        if (existing != null && existing.isConnected) return existing
+        val target = targetSpec ?: error("SSH is not connected")
+        val ssh = openClient(target)
+        probeClient = ssh
+        return ssh
+    }
+
+    private fun closeProbe() {
+        val ssh = probeClient
+        probeClient = null
+        runCatching { ssh?.disconnect() }
     }
 
     private fun authenticate(ssh: SSHClient, target: ConnectSpec) {
@@ -311,6 +360,7 @@ class SshSession(
 
     private fun closeQuietly() {
         readerJob?.cancel()
+        closeProbe()
         synchronized(lock) {
             runCatching { shell?.close() }
             runCatching { session?.close() }

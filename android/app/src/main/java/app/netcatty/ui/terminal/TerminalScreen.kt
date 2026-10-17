@@ -69,6 +69,7 @@ import app.netcatty.ai.PermissionMode
 import app.netcatty.data.ConnectSpec
 import app.netcatty.session.LiveSession
 import app.netcatty.session.LiveStatus
+import app.netcatty.session.listStatus
 import app.netcatty.ssh.SshSession
 import app.netcatty.ssh.escapeJsString
 import app.netcatty.ui.docker.DockerScreen
@@ -123,7 +124,7 @@ fun TerminalScreen(
     }
 
     LaunchedEffect(live.id, live.status) {
-        if (live.status != LiveStatus.CONNECTED) {
+        if (live.listStatus() != LiveStatus.CONNECTED) {
             composeProject = null
             return@LaunchedEffect
         }
@@ -429,7 +430,7 @@ class SessionHolder {
     }
 }
 
-private fun statusLabel(live: LiveSession): String = when (live.status) {
+private fun statusLabel(live: LiveSession): String = when (live.listStatus()) {
     LiveStatus.CONNECTING -> "正在连接…"
     LiveStatus.CONNECTED -> live.spec.connectionLine
     LiveStatus.FAILED -> live.error?.let { "连接失败：$it" } ?: "连接失败"

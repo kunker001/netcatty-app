@@ -43,7 +43,6 @@ fun WebSearchSettings(
     val preset = config.preset
     var providerOpen by remember { mutableStateOf(false) }
 
-    Text("网络搜索", color = MidnightText, fontSize = 14.sp, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
     Text(
         "允许 Catty 搜索互联网获取最新信息。",
         color = MidnightMuted,
