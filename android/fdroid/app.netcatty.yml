@@ -28,10 +28,7 @@ Builds:
       - fdroid
     output: app/build/outputs/apk/fdroid/release/app-fdroid-release-unsigned.apk
 
-# Fill this in after signing netcatty-0.2.2.apk:
-#   apksigner verify --print-certs netcatty-0.2.2.apk
-# Copy the SHA-256 digest, with no colons.
-# AllowedAPKSigningKeys: <certificate SHA-256>
+AllowedAPKSigningKeys: a3bd9a70b44d4e744cfa2ef14d3b63bbd4b84649d4d93d3b1fc7c2cb0c60849e
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
