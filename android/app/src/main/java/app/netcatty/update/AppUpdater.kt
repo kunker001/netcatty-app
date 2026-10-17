@@ -44,7 +44,10 @@ class AppUpdater(context: Context) {
 
     fun currentVersion(): String = BuildConfig.VERSION_NAME
 
+    fun selfUpdateEnabled(): Boolean = BuildConfig.SELF_UPDATE
+
     fun shouldAutoCheck(): Boolean {
+        if (!selfUpdateEnabled()) return false
         val last = prefs.getLong(KEY_LAST_CHECK, 0L)
         return System.currentTimeMillis() - last >= AUTO_CHECK_MS
     }
@@ -87,6 +90,7 @@ class AppUpdater(context: Context) {
         release: AppRelease,
         onProgress: (Float) -> Unit = {},
     ): File = withContext(Dispatchers.IO) {
+        if (!selfUpdateEnabled()) throw AppUpdateException("此版本由 F-Droid 更新")
         val request = Request.Builder()
             .url(release.apkUrl)
             .header("User-Agent", "Netcatty-Android/${currentVersion()}")
@@ -137,6 +141,7 @@ class AppUpdater(context: Context) {
     }
 
     fun install(file: File) {
+        if (!selfUpdateEnabled()) throw AppUpdateException("此版本由 F-Droid 更新")
         if (!file.isFile) throw AppUpdateException("安装包不存在")
         val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.files", file)
         val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -197,8 +202,9 @@ private data class GithubAsset(
 
 private fun GithubRelease.toAppRelease(): AppRelease? {
     if (prerelease) return null
-    val apk = assets.firstOrNull { it.name.endsWith(".apk", ignoreCase = true) && it.browserDownloadUrl.isNotBlank() }
-        ?: return null
+    val apk = assets.firstOrNull {
+        it.name.endsWith("-github.apk", ignoreCase = true) && it.browserDownloadUrl.isNotBlank()
+    } ?: return null
     val version = tagName.trim().removePrefix("v").removePrefix("V").ifBlank {
         name?.trim().orEmpty().removePrefix("v").removePrefix("V")
     }

@@ -58,8 +58,8 @@
 
 ```powershell
 cd android
-.\gradlew.bat assembleDebug
-adb install -r app\build\outputs\apk\debug\app-debug.apk
+.\gradlew.bat assembleGithubDebug
+adb install -r app\build\outputs\apk\github\debug\app-github-debug.apk
 ```
 
 ## 授權

@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white">
   &nbsp;
-  <img alt="Version" src="https://img.shields.io/badge/Version-0.2.1-blue?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/Version-0.2.2-blue?style=for-the-badge">
   &nbsp;
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-green?style=for-the-badge"></a>
 </p>
@@ -89,7 +89,7 @@
 2. 回到连接列表，点 **+** 选主机连接。
 3. 在终端里打开 SFTP、Docker、端口转发，或进入 Catty。
 4. 首次用 Catty：到 **设置** 填写 OpenAI 兼容的 API 地址和 Key，需要时刷新模型列表。
-5. 应用更新来自 GitHub Release。打开 App 会自动检查；也可在 **设置 → 关于** 里手动检查并下载安装。
+5. GitHub 安装包会在打开时检查 Release，也可在 **设置 → 关于** 里下载安装。F-Droid 安装包从 F-Droid 更新，应用内不安装 APK。
 
 危险命令仍会被安全规则拦截。切到后台时，有会话或隧道会显示保活通知。
 
@@ -101,13 +101,13 @@
 $env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"
 $env:ANDROID_HOME="$env:LOCALAPPDATA\Android\Sdk"
 cd android
-.\gradlew.bat assembleDebug
+.\gradlew.bat assembleGithubDebug
 ```
 
-APK 在 `android/app/build/outputs/apk/debug/app-debug.apk`。
+APK 在 `android/app/build/outputs/apk/github/debug/app-github-debug.apk`。
 
 ```powershell
-adb install -r android\app\build\outputs\apk\debug\app-debug.apk
+adb install -r android\app\build\outputs\apk\github\debug\app-github-debug.apk
 ```
 
 更细的 Android 工程说明见 [`android/README.md`](android/README.md)。
@@ -121,7 +121,7 @@ adb install -r android\app\build\outputs\apk\debug\app-debug.apk
 | 终端 | WebView + xterm.js |
 | 保险库 | EncryptedFile（AES-256-GCM） |
 | Catty | OpenAI 兼容 API、OkHttp |
-| 包名 / 版本 | `app.netcatty` · 0.2.1 |
+| 包名 / 版本 | `app.netcatty` · 0.2.2 |
 
 ## 和桌面版的关系
 

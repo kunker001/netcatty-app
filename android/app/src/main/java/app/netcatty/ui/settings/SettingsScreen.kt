@@ -569,6 +569,14 @@ private fun AboutSettingsPage(updater: AppUpdater, onBack: () -> Unit) {
             supportingContent = { Text(updater.currentVersion()) },
             colors = listColors(),
         )
+        if (!updater.selfUpdateEnabled()) {
+            ListItem(
+                headlineContent = { Text("更新", fontSize = 14.sp) },
+                supportingContent = { Text("这个版本由 F-Droid 分发，更新也从 F-Droid 安装。") },
+                colors = listColors(),
+            )
+            return@SettingsDetail
+        }
         ListItem(
             headlineContent = { Text("更新源", fontSize = 14.sp) },
             supportingContent = { Text("GitHub Release · $GITHUB_REPO") },

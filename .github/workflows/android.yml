@@ -1,7 +1,12 @@
 name: android
 
 # Compile the native Android client under android/.
-# Debug APK only — there is no release keystore in this repo.
+# Branch and pull-request runs build the GitHub debug APK.
+# Version tags build signed release APKs:
+#   netcatty-<version>.apk         F-Droid reproducible binary, no self-updater
+#   netcatty-<version>-github.apk  sideload build that installs updates itself
+# Tag runs need Actions secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
+# ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD.
 on:
   workflow_dispatch:
   push:
@@ -25,7 +30,7 @@ permissions:
 
 jobs:
   build:
-    name: assemble-debug
+    name: assemble
     runs-on: ubuntu-latest
     timeout-minutes: 40
     defaults:
@@ -73,40 +78,87 @@ jobs:
           yes | "$sdkmanager" --licenses >/dev/null
           exit 0
 
-      - name: Build debug APK
+      - name: Build APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          version="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+          tagver="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$tagver" == "$version" ]]; then
+            missing=()
+            [[ -n "${ANDROID_KEYSTORE_BASE64}" ]] || missing+=("ANDROID_KEYSTORE_BASE64")
+            [[ -n "${ANDROID_KEYSTORE_PASSWORD}" ]] || missing+=("ANDROID_KEYSTORE_PASSWORD")
+            [[ -n "${ANDROID_KEY_ALIAS}" ]] || missing+=("ANDROID_KEY_ALIAS")
+            [[ -n "${ANDROID_KEY_PASSWORD}" ]] || missing+=("ANDROID_KEY_PASSWORD")
+            if (( ${#missing[@]} )); then
+              echo "::error::Release tags need a signing key. Add GitHub Actions secrets: ${missing[*]}"
+              exit 1
+            fi
+            keystore="$RUNNER_TEMP/netcatty-release.jks"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
+            export ANDROID_KEYSTORE_PATH="$keystore"
+            ./gradlew assembleFdroidRelease assembleGithubRelease --no-daemon --stacktrace
+          else
+            ./gradlew assembleGithubDebug --no-daemon --stacktrace
+          fi
 
       - name: Name APK
         id: apk
         run: |
+          set -euo pipefail
           version="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
           if [[ -z "$version" ]]; then
             version="0.0.0"
           fi
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            name="netcatty-${GITHUB_REF_NAME#v}-debug.apk"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          tagver="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$tagver" == "$version" ]]; then
+            fdroid_src="app/build/outputs/apk/fdroid/release/app-fdroid-release.apk"
+            github_src="app/build/outputs/apk/github/release/app-github-release.apk"
+            if [[ ! -f "$fdroid_src" || ! -f "$github_src" ]]; then
+              echo "::error::Signed release APKs were not produced."
+              find app/build/outputs/apk -name '*.apk' -print
+              exit 1
+            fi
+            aapt="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name aapt -type f | sort | tail -n 1)"
+            if [[ -z "$aapt" ]]; then
+              echo "::error::aapt was not found under the Android SDK."
+              exit 1
+            fi
+            if "$aapt" dump permissions "$fdroid_src" | grep -q REQUEST_INSTALL_PACKAGES; then
+              echo "::error::F-Droid APK still requests REQUEST_INSTALL_PACKAGES."
+              exit 1
+            fi
+            if ! "$aapt" dump permissions "$github_src" | grep -q REQUEST_INSTALL_PACKAGES; then
+              echo "::error::GitHub APK is missing REQUEST_INSTALL_PACKAGES."
+              exit 1
+            fi
+            cp "$github_src" "$GITHUB_WORKSPACE/artifacts/netcatty-${tagver}-github.apk"
+            cp "$fdroid_src" "$GITHUB_WORKSPACE/artifacts/netcatty-${tagver}.apk"
+            echo "artifact=netcatty-v${tagver}" >> "$GITHUB_OUTPUT"
           else
             name="netcatty-${version}-${GITHUB_SHA:0:7}-debug.apk"
+            cp app/build/outputs/apk/github/debug/app-github-debug.apk "$GITHUB_WORKSPACE/artifacts/${name}"
+            echo "artifact=${name}" >> "$GITHUB_OUTPUT"
           fi
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/artifacts/${name}"
-          echo "name=${name}" >> "$GITHUB_OUTPUT"
-          echo "Built ${name}"
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.apk.outputs.name }}
-          path: artifacts/${{ steps.apk.outputs.name }}
+          name: ${{ steps.apk.outputs.artifact }}
+          path: artifacts/*.apk
           if-no-files-found: error
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/${{ steps.apk.outputs.name }}
+          files: artifacts/*.apk
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true

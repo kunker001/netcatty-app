@@ -1,0 +1,15 @@
+Netcatty is a native Android SSH client, written with Kotlin and Jetpack Compose. The interface is currently Chinese.
+
+One host can keep several SSH connections open. Catty chats are stored on the host, so the history is still there after a connection closes.
+
+An encrypted vault stores labels, hosts, ports, users, passwords or private keys, and notes. The home screen lists only live sessions.
+
+The terminal is an interactive SSH shell with pinch-to-zoom, a blinking cursor, and long-press selection. When the working directory contains docker-compose, containers can be started, stopped, restarted, paused, and opened for logs or a shell.
+
+SFTP can browse the remote filesystem, including /. A built-in editor highlights and formats common text files such as yml and conf, and can point the terminal at the current path.
+
+Port forwarding covers local, remote, and dynamic SOCKS5 tunnels. Tunnels can start with the app. A notification keeps them running in the background and opens the tunnel list.
+
+Catty is an optional ops chat bound to a host. Modes are observe, confirm, and automatic. Commands run in an interactive shell, and each step stays visible. You supply your own OpenAI-compatible API endpoint and key. Command blocklists and web search are optional and off until you configure them. Netcatty does not ship an API key.
+
+This build is updated through F-Droid. It does not download or install its own APKs.

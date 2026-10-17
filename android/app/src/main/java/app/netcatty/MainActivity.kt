@@ -124,7 +124,7 @@ class MainActivity : ComponentActivity() {
                     app.tunnels.autostart()
                     app.ai.load()
                     app.commandSafety.apply(app.ai.settings.value.commandBlocklist)
-                    if (app.updates.shouldAutoCheck()) {
+                    if (app.updates.selfUpdateEnabled() && app.updates.shouldAutoCheck()) {
                         val latest = runCatching { app.updates.newerRelease() }.getOrNull()
                         app.updates.markChecked()
                         if (latest != null && latest.version != app.updates.skippedVersion()) {

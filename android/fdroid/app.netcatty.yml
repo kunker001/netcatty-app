@@ -1,0 +1,40 @@
+Categories:
+  - Internet
+  - Security
+License: GPL-3.0-only
+AuthorName: kun
+AuthorEmail: kunker002@gmail.com
+AuthorWebSite: https://github.com/kunker001
+SourceCode: https://github.com/kunker001/netcatty-app
+IssueTracker: https://github.com/kunker001/netcatty-app/issues
+Changelog: https://github.com/kunker001/netcatty-app/releases
+
+AutoName: Netcatty
+
+RepoType: git
+Repo: https://github.com/kunker001/netcatty-app.git
+Binaries: https://github.com/kunker001/netcatty-app/releases/download/v%v/netcatty-%v.apk
+
+Builds:
+  - versionName: '0.2.2'
+    versionCode: 4
+    commit: v0.2.2
+    subdir: android
+    sudo:
+      - apt-get update
+      - apt-get install -y openjdk-17-jdk-headless
+      - update-java-alternatives -a
+    gradle:
+      - fdroid
+    output: app/build/outputs/apk/fdroid/release/app-fdroid-release-unsigned.apk
+
+# Fill this in after signing netcatty-0.2.2.apk:
+#   apksigner verify --print-certs netcatty-0.2.2.apk
+# Copy the SHA-256 digest, with no colons.
+# AllowedAPKSigningKeys: <certificate SHA-256>
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+UpdateCheckData: android/app/build.gradle.kts|versionCode = (\d+)|versionName = "([^"]+)"
+CurrentVersion: '0.2.2'
+CurrentVersionCode: 4

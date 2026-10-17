@@ -88,6 +88,8 @@
 !types/**
 !android/
 !android/**
+!fastlane/
+!fastlane/**
 !img/
 !img/**
 

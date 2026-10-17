@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white">
   &nbsp;
-  <img alt="Version" src="https://img.shields.io/badge/Version-0.2.1-blue?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/Version-0.2.2-blue?style=for-the-badge">
   &nbsp;
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-green?style=for-the-badge"></a>
 </p>
@@ -89,7 +89,7 @@ Netcatty for phones: a native Kotlin / Jetpack Compose app, not an Electron wrap
 2. On the connection list, tap **+** and connect.
 3. From the terminal, open SFTP, Docker, tunnels, or Catty.
 4. First Catty run: open **Settings**, set an OpenAI-compatible API base and key, then refresh the model list if needed.
-5. Updates come from GitHub Releases. The app checks on launch; you can also check from **Settings → About**.
+5. The GitHub build checks Releases on launch, and can also download from **Settings → About**. The F-Droid build updates through F-Droid and does not install APKs itself.
 
 Destructive commands stay blocked by the safety rules. With a live session or tunnel, a keep-alive notification stays in the shade.
 
@@ -101,13 +101,13 @@ Needs JDK 17+ and Android SDK 35. Minimum Android 8.0 (API 26).
 $env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"
 $env:ANDROID_HOME="$env:LOCALAPPDATA\Android\Sdk"
 cd android
-.\gradlew.bat assembleDebug
+.\gradlew.bat assembleGithubDebug
 ```
 
-The APK is `android/app/build/outputs/apk/debug/app-debug.apk`.
+The APK is `android/app/build/outputs/apk/github/debug/app-github-debug.apk`.
 
 ```powershell
-adb install -r android\app\build\outputs\apk\debug\app-debug.apk
+adb install -r android\app\build\outputs\apk\github\debug\app-github-debug.apk
 ```
 
 More Android project notes: [`android/README.md`](android/README.md).
@@ -121,7 +121,7 @@ More Android project notes: [`android/README.md`](android/README.md).
 | Terminal | WebView + xterm.js |
 | Vault | EncryptedFile (AES-256-GCM) |
 | Catty | OpenAI-compatible API, OkHttp |
-| Package / version | `app.netcatty` · 0.2.1 |
+| Package / version | `app.netcatty` · 0.2.2 |
 
 ## Relation to the desktop app
 

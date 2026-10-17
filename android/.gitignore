@@ -6,3 +6,6 @@
 *.iml
 /.cxx/
 /captures/
+/keystore.properties
+*.jks
+*.keystore
