@@ -1,5 +1,9 @@
 package app.netcatty
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -17,6 +21,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import app.netcatty.data.SshConnection
+import app.netcatty.ssh.SessionKeepAliveService
 import app.netcatty.ssh.shSingleQuote
 import app.netcatty.ui.connection.ConnectionEditorScreen
 import app.netcatty.ui.home.ConnectionListScreen
@@ -30,11 +35,28 @@ import app.netcatty.ui.sftp.SftpScreen
 import app.netcatty.ui.terminal.SessionHolder
 import app.netcatty.ui.terminal.TerminalScreen
 import app.netcatty.ui.theme.NetcattyTheme
+import app.netcatty.ui.tunnel.TunnelEditorScreen
+import app.netcatty.ui.tunnel.TunnelListScreen
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private val pendingOpen = MutableStateFlow<OpenTarget?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingOpen.value = OpenTarget.from(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingOpen.value = OpenTarget.from(intent)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 10)
+        }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
@@ -51,7 +73,10 @@ class MainActivity : ComponentActivity() {
                 val pings by app.pings.pings.collectAsStateWithLifecycle()
                 val hostStats by app.hostStats.stats.collectAsStateWithLifecycle()
                 val opsExecutions by app.opsChats.executions.collectAsStateWithLifecycle()
+                val tunnelRules by app.tunnels.rules.collectAsStateWithLifecycle()
+                val tunnelStatus by app.tunnels.status.collectAsStateWithLifecycle()
                 val sessionHolder = remember { SessionHolder() }
+                val openTarget by pendingOpen.collectAsStateWithLifecycle()
 
                 fun openConnection(conn: SshConnection) {
                     val spec = app.hosts.spec(conn.id) ?: return
@@ -65,8 +90,45 @@ class MainActivity : ComponentActivity() {
 
                 LaunchedEffect(Unit) {
                     app.hosts.load()
+                    app.tunnels.load()
+                    app.tunnels.autostart()
                     app.ai.load()
                     app.commandSafety.apply(app.ai.settings.value.commandBlocklist)
+                }
+
+                LaunchedEffect(openTarget, hosts, liveSessions) {
+                    val target = openTarget ?: return@LaunchedEffect
+                    val handled = when (target.dest) {
+                        SessionKeepAliveService.OPEN_CATTY -> {
+                            val hostId = target.hostId
+                            if (hostId.isNullOrBlank()) return@LaunchedEffect
+                            if (hosts.none { it.id == hostId }) {
+                                if (hosts.isNotEmpty()) pendingOpen.value = null
+                                return@LaunchedEffect
+                            }
+                            nav.navigate("catty/$hostId") { launchSingleTop = true }
+                            true
+                        }
+                        SessionKeepAliveService.OPEN_SESSION -> {
+                            val session = liveSessions.firstOrNull { it.id == target.sessionId }
+                                ?: liveSessions.firstOrNull { target.hostId == null || it.spec.hostId == target.hostId }
+                            if (session == null) {
+                                pendingOpen.value = null
+                                return@LaunchedEffect
+                            }
+                            nav.navigate("session/${session.id}") {
+                                popUpTo("home")
+                                launchSingleTop = true
+                            }
+                            true
+                        }
+                        SessionKeepAliveService.OPEN_TUNNELS -> {
+                            nav.navigate("tunnels") { launchSingleTop = true }
+                            true
+                        }
+                        else -> true
+                    }
+                    if (handled) pendingOpen.value = null
                 }
 
                 NavHost(navController = nav, startDestination = "home") {
@@ -86,6 +148,7 @@ class MainActivity : ComponentActivity() {
                                 nav.navigate("session/${live.id}")
                             },
                             onHosts = { nav.navigate("hosts") },
+                            onTunnels = { nav.navigate("tunnels") },
                             onSettings = { nav.navigate("settings") },
                         )
                     }
@@ -111,7 +174,11 @@ class MainActivity : ComponentActivity() {
                             onOpenCatty = { nav.navigate("catty/${it.id}") },
                             onOpenNotes = { nav.navigate("host/${it.id}/notes") },
                             onDelete = { host ->
-                                scope.launch { app.hosts.deleteHost(host.id) }
+                                val connectionIds = app.hosts.connectionsFor(host.id).map { it.id }.toSet()
+                                scope.launch {
+                                    app.tunnels.removeConnections(connectionIds)
+                                    app.hosts.deleteHost(host.id)
+                                }
                                 app.opsChats.deleteHost(host.id)
                             },
                         )
@@ -234,6 +301,9 @@ class MainActivity : ComponentActivity() {
                                 onBack = { nav.popBackStack() },
                                 onDisconnect = { app.liveSessions.close(live.id) },
                                 onOpenSftp = { nav.navigate("sftp") },
+                                onOpenTunnels = {
+                                    nav.navigate("tunnels?connectionId=${live.spec.connectionId}")
+                                },
                                 onOpenSettings = { nav.navigate("settings") },
                                 onOpenNotes = { nav.navigate("host/${live.spec.hostId}/notes") },
                                 onPermissionChange = { mode ->
@@ -278,7 +348,7 @@ class MainActivity : ComponentActivity() {
                                 ),
                                 store = app.opsChats,
                                 appScope = app.appScope,
-                                startInHistory = true,
+                                startInHistory = opsExecutions.none { it.hostId == host.id },
                                 onBack = { nav.popBackStack() },
                                 onOpenSettings = { nav.navigate("settings") },
                                 onPermissionChange = { mode ->
@@ -303,6 +373,65 @@ class MainActivity : ComponentActivity() {
                             },
                         )
                     }
+                    composable(
+                        "tunnels?connectionId={connectionId}",
+                        arguments = listOf(
+                            navArgument("connectionId") {
+                                type = NavType.StringType
+                                defaultValue = ""
+                            },
+                        ),
+                    ) { entry ->
+                        val preset = entry.arguments?.getString("connectionId").orEmpty()
+                        TunnelListScreen(
+                            rules = tunnelRules,
+                            status = tunnelStatus,
+                            hosts = hosts,
+                            connections = connections,
+                            onBack = { nav.popBackStack() },
+                            onAdd = {
+                                val query = if (preset.isBlank()) "" else "?connectionId=$preset"
+                                nav.navigate("tunnel/new$query")
+                            },
+                            onOpen = { rule -> nav.navigate("tunnel/${rule.id}") },
+                            onStart = { app.tunnels.start(it) },
+                            onStop = { app.tunnels.stop(it.id) },
+                            onDelete = { rule -> scope.launch { app.tunnels.delete(rule.id) } },
+                        )
+                    }
+                    composable(
+                        "tunnel/{id}?connectionId={connectionId}",
+                        arguments = listOf(
+                            navArgument("id") { type = NavType.StringType },
+                            navArgument("connectionId") {
+                                type = NavType.StringType
+                                defaultValue = ""
+                            },
+                        ),
+                    ) { entry ->
+                        val id = entry.arguments?.getString("id")
+                        val preset = entry.arguments?.getString("connectionId").orEmpty()
+                        val initial = if (id == null || id == "new") null else tunnelRules.firstOrNull { it.id == id }
+                        if (id != null && id != "new" && initial == null && tunnelRules.isNotEmpty()) {
+                            LaunchedEffect(id) { nav.popBackStack() }
+                        } else {
+                            TunnelEditorScreen(
+                                hosts = hosts,
+                                connections = connections,
+                                initial = initial,
+                                presetConnectionId = preset.ifBlank { null },
+                                onBack = { nav.popBackStack() },
+                                onCreateConnection = { nav.navigate("hosts") },
+                                onSave = { rule, startNow ->
+                                    scope.launch {
+                                        app.tunnels.save(rule)
+                                        if (startNow) app.tunnels.start(rule)
+                                        nav.popBackStack()
+                                    }
+                                },
+                            )
+                        }
+                    }
                     composable("settings") {
                         SettingsScreen(
                             store = app.ai,
@@ -314,6 +443,23 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+}
+
+private data class OpenTarget(
+    val dest: String,
+    val hostId: String?,
+    val sessionId: String?,
+) {
+    companion object {
+        fun from(intent: Intent?): OpenTarget? {
+            val dest = intent?.getStringExtra(SessionKeepAliveService.EXTRA_OPEN_DEST) ?: return null
+            return OpenTarget(
+                dest = dest,
+                hostId = intent.getStringExtra(SessionKeepAliveService.EXTRA_HOST_ID),
+                sessionId = intent.getStringExtra(SessionKeepAliveService.EXTRA_SESSION_ID),
+            )
         }
     }
 }

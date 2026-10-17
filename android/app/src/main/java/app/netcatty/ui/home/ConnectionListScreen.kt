@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Lan
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Settings
@@ -83,6 +84,7 @@ fun ConnectionListScreen(
     onDisconnect: (LiveSession) -> Unit,
     onRetry: (LiveSession) -> Unit,
     onHosts: () -> Unit,
+    onTunnels: () -> Unit,
     onSettings: () -> Unit,
 ) {
     LaunchedEffect(sessions) {
@@ -123,6 +125,9 @@ fun ConnectionListScreen(
                         fontStyle = FontStyle.Italic,
                     )
                     Text("仅显示正在进行的会话", color = MidnightMuted, fontSize = 12.sp)
+                }
+                IconButton(onClick = onTunnels) {
+                    Icon(Icons.Outlined.Lan, contentDescription = "隧道", tint = MidnightMuted)
                 }
                 IconButton(onClick = onHosts) {
                     Icon(Icons.Outlined.Dns, contentDescription = "主机", tint = MidnightMuted)
@@ -206,6 +211,10 @@ private fun LiveSessionCard(
         if (ai != null) {
             append(" · ")
             append(ai.label)
+            if (ai.step.isNotBlank()) {
+                append(" · ")
+                append(ai.step)
+            }
         }
     }
     Row(

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Lan
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -105,6 +106,7 @@ fun TerminalScreen(
     onBack: () -> Unit,
     onDisconnect: () -> Unit,
     onOpenSftp: () -> Unit,
+    onOpenTunnels: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenNotes: () -> Unit,
     onPermissionChange: (PermissionMode) -> Unit,
@@ -217,6 +219,9 @@ fun TerminalScreen(
                             tint = MidnightPrimary,
                         )
                     }
+                }
+                IconButton(onClick = onOpenTunnels) {
+                    Icon(Icons.Outlined.Lan, contentDescription = "隧道", tint = MidnightPrimary)
                 }
                 IconButton(onClick = onOpenSftp) {
                     Icon(Icons.Outlined.Folder, contentDescription = "SFTP", tint = MidnightPrimary)

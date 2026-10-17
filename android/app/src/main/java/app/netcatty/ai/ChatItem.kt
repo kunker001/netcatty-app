@@ -11,7 +11,7 @@ sealed class ChatItem {
     data class Assistant(val text: String) : ChatItem()
 
     @Serializable
-    data class Tool(val name: String, val detail: String, val ok: Boolean) : ChatItem()
+    data class Tool(val name: String, val detail: String, val ok: Boolean, val running: Boolean = false) : ChatItem()
 
     @Serializable
     data class Error(val text: String) : ChatItem()

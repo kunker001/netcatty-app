@@ -1,9 +1,12 @@
 package app.netcatty.ssh
 
-import app.netcatty.data.AuthMethod
+import android.os.Build
+import android.system.Os
+import android.system.OsConstants
 import app.netcatty.data.ConnectSpec
+import java.io.FileDescriptor
 import java.io.InputStream
-import java.security.MessageDigest
+import java.net.Socket
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -21,8 +24,6 @@ import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.connection.channel.direct.SessionChannel
 import net.schmizz.sshj.sftp.SFTPClient
-import net.schmizz.sshj.transport.verification.HostKeyVerifier
-import net.schmizz.sshj.userauth.keyprovider.KeyProvider
 import net.schmizz.sshj.xfer.FileSystemFile
 
 class SshSession(
@@ -307,15 +308,7 @@ class SshSession(
         }
     }
 
-    private fun openClient(target: ConnectSpec): SSHClient {
-        val ssh = SshCrypto.client()
-        ssh.addHostKeyVerifier(AcceptThenRememberVerifier)
-        ssh.connectTimeout = 15_000
-        ssh.connect(target.hostname, target.port)
-        enableSocketKeepAlive(ssh)
-        authenticate(ssh, target)
-        return ssh
-    }
+    private fun openClient(target: ConnectSpec): SSHClient = dialSsh(target)
 
     private fun ensureProbeClient(): SSHClient {
         val existing = probeClient
@@ -332,32 +325,6 @@ class SshSession(
         runCatching { ssh?.disconnect() }
     }
 
-    private fun authenticate(ssh: SSHClient, target: ConnectSpec) {
-        when (target.authMethod) {
-            AuthMethod.PASSWORD -> ssh.authPassword(target.username, target.password)
-            AuthMethod.KEY -> {
-                val key = loadKey(ssh, target)
-                ssh.authPublickey(target.username, key)
-            }
-        }
-    }
-
-    private fun loadKey(ssh: SSHClient, target: ConnectSpec): KeyProvider {
-        val pem = target.privateKey.trim()
-        require(pem.isNotBlank()) { "缺少私钥" }
-        val passwordFinder = if (target.passphrase.isBlank()) {
-            null
-        } else {
-            object : net.schmizz.sshj.userauth.password.PasswordFinder {
-                override fun reqPassword(resource: net.schmizz.sshj.userauth.password.Resource<*>?) =
-                    target.passphrase.toCharArray()
-
-                override fun shouldRetry(resource: net.schmizz.sshj.userauth.password.Resource<*>?) = false
-            }
-        }
-        return ssh.loadKeys(pem, null, passwordFinder)
-    }
-
     private fun closeQuietly() {
         readerJob?.cancel()
         closeProbe()
@@ -369,29 +336,6 @@ class SshSession(
             session = null
             client = null
         }
-    }
-}
-
-private object AcceptThenRememberVerifier : HostKeyVerifier {
-    private val seen = mutableMapOf<String, String>()
-
-    override fun verify(hostname: String, port: Int, key: java.security.PublicKey): Boolean {
-        val fingerprint = sha256(key.encoded)
-        val slot = "$hostname:$port"
-        val previous = seen[slot]
-        return if (previous == null) {
-            seen[slot] = fingerprint
-            true
-        } else {
-            previous == fingerprint
-        }
-    }
-
-    override fun findExistingAlgorithms(hostname: String, port: Int): MutableList<String> = mutableListOf()
-
-    private fun sha256(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-        return digest.joinToString("") { "%02x".format(it) }
     }
 }
 
@@ -411,14 +355,14 @@ fun friendlySshError(message: String?): String? {
     val lower = text.lowercase()
     return when {
         "connection abort" in lower || "connection reset" in lower || "broken pipe" in lower -> "连接中断，请重试"
-        "timed out" in lower || "timeout" in lower || "connection refused" in lower -> "连接超时或被拒绝"
+        "timed out" in lower || "timeout" in lower || "connection refused" in lower || "failed to connect" in lower -> "连接超时或被拒绝"
         "auth fail" in lower || "authentication" in lower || "permission denied" in lower -> "认证失败"
         "unknownhost" in lower || "unable to resolve" in lower -> "无法解析主机名"
         else -> text
     }
 }
 
-private fun enableSocketKeepAlive(ssh: SSHClient) {
+internal fun enableSocketKeepAlive(ssh: SSHClient) {
     var cls: Class<*>? = ssh.javaClass
     while (cls != null) {
         val type = cls
@@ -426,15 +370,48 @@ private fun enableSocketKeepAlive(ssh: SSHClient) {
         if (field != null) {
             field.isAccessible = true
             runCatching {
-                (field.get(ssh) as? java.net.Socket)?.apply {
+                (field.get(ssh) as? Socket)?.apply {
                     keepAlive = true
                     tcpNoDelay = true
+                    tuneTcpKeepAlive(this)
                 }
             }
             return
         }
         cls = type.superclass
     }
+}
+
+private const val TCP_KEEPIDLE = 4
+private const val TCP_KEEPINTVL = 5
+private const val TCP_KEEPCNT = 6
+
+private fun tuneTcpKeepAlive(socket: Socket) {
+    if (Build.VERSION.SDK_INT < 29) return
+    val fd = socketFileDescriptor(socket) ?: return
+    runCatching {
+        // Linux TCP keepalive options. The platform default idle time is two hours,
+        // which is long enough for Android to drop a quiet session.
+        Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPIDLE, 45)
+        Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPINTVL, 15)
+        Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPCNT, 3)
+    }
+}
+
+private fun socketFileDescriptor(socket: Socket): FileDescriptor? {
+    val impl = runCatching {
+        Socket::class.java.getDeclaredField("impl").apply { isAccessible = true }.get(socket)
+    }.getOrNull() ?: return null
+    var type: Class<*>? = impl.javaClass
+    while (type != null) {
+        val field = runCatching { type.getDeclaredField("fd") }.getOrNull()
+        if (field != null) {
+            field.isAccessible = true
+            return field.get(impl) as? FileDescriptor
+        }
+        type = type.superclass
+    }
+    return null
 }
 
 fun shSingleQuote(value: String): String =

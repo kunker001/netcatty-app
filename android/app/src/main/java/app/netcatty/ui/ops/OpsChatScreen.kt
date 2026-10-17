@@ -1,5 +1,9 @@
 package app.netcatty.ui.ops
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,11 +27,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Settings
@@ -51,10 +57,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.netcatty.ai.AiSettings
@@ -215,17 +224,18 @@ private fun ChatPane(
                 appScope.launch(Dispatchers.Main) {
                     when (event) {
                         is OpsEvent.AssistantDelta -> chat.items += ChatItem.Assistant(event.text)
-                        is OpsEvent.ToolStarted -> chat.items += ChatItem.Tool(event.name, event.detail, true)
+                        is OpsEvent.ToolStarted -> chat.items += ChatItem.Tool(event.name, event.detail, ok = true, running = true)
                         is OpsEvent.ToolFinished -> {
                             val last = chat.items.lastOrNull()
                             if (last is ChatItem.Tool && last.name == event.name) {
-                                chat.items[chat.items.lastIndex] = ChatItem.Tool(event.name, event.detail, event.ok)
+                                chat.items[chat.items.lastIndex] = ChatItem.Tool(event.name, event.detail, event.ok, running = false)
                             } else {
-                                chat.items += ChatItem.Tool(event.name, event.detail, event.ok)
+                                chat.items += ChatItem.Tool(event.name, event.detail, event.ok, running = false)
                             }
                         }
                         is OpsEvent.Failed -> chat.items += ChatItem.Error(event.message)
                     }
+                    store.persist(hostId)
                 }
             },
         ).also { agent ->
@@ -337,7 +347,7 @@ private fun ChatPane(
                         is ChatItem.User -> Bubble(item.text, user = true)
                         is ChatItem.Assistant -> Bubble(item.text, user = false)
                         is ChatItem.Tool -> ToolCard(item)
-                        is ChatItem.Error -> Text(item.text, color = MidnightDanger, fontSize = 13.sp)
+                        is ChatItem.Error -> CopyableMessage(item.text, color = MidnightDanger, fontSize = 13.sp)
                     }
                 }
                 if (busy) {
@@ -550,18 +560,95 @@ private fun HistoryRow(
 
 @Composable
 private fun Bubble(text: String, user: Boolean) {
-    Box(Modifier.fillMaxWidth(), contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart) {
+    CopyableMessage(
+        text,
+        color = MidnightText,
+        fontSize = 13.sp,
+        alignEnd = user,
+        modifier = Modifier
+            .background(
+                if (user) MidnightPrimary.copy(alpha = 0.16f) else MidnightSurface,
+                RoundedCornerShape(12.dp),
+            )
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    )
+}
+
+@Composable
+private fun CopyableMessage(
+    text: String,
+    color: Color,
+    fontSize: TextUnit,
+    modifier: Modifier = Modifier,
+    alignEnd: Boolean = false,
+    fontFamily: FontFamily? = null,
+    fontWeight: FontWeight? = null,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Top,
+    ) {
+        if (alignEnd) CopyButton(text)
+        CopyableText(
+            text = text,
+            color = color,
+            fontSize = fontSize,
+            modifier = modifier.weight(1f),
+            fontFamily = fontFamily,
+            fontWeight = fontWeight,
+            maxLines = maxLines,
+            overflow = overflow,
+        )
+        if (!alignEnd) CopyButton(text)
+    }
+}
+
+@Composable
+private fun CopyButton(text: String) {
+    val context = LocalContext.current
+    IconButton(
+        onClick = { copyPlainText(context, text) },
+        modifier = Modifier.size(32.dp),
+    ) {
+        Icon(
+            Icons.Outlined.ContentCopy,
+            contentDescription = "复制",
+            tint = MidnightMuted,
+            modifier = Modifier.size(14.dp),
+        )
+    }
+}
+
+private fun copyPlainText(context: Context, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("netcatty", text))
+    Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+}
+
+@Composable
+private fun CopyableText(
+    text: String,
+    color: Color,
+    fontSize: TextUnit,
+    modifier: Modifier = Modifier,
+    fontFamily: FontFamily? = null,
+    fontWeight: FontWeight? = null,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
+) {
+    SelectionContainer(modifier = modifier) {
         Text(
             text,
-            color = MidnightText,
-            fontSize = 13.sp,
-            modifier = Modifier
-                .fillMaxWidth(0.92f)
-                .background(
-                    if (user) MidnightPrimary.copy(alpha = 0.16f) else MidnightSurface,
-                    RoundedCornerShape(12.dp),
-                )
-                .padding(horizontal = 10.dp, vertical = 8.dp),
+            color = color,
+            fontSize = fontSize,
+            fontFamily = fontFamily,
+            fontWeight = fontWeight,
+            maxLines = maxLines,
+            overflow = overflow,
+            modifier = Modifier.fillMaxWidth(),
         )
     }
 }
@@ -576,16 +663,16 @@ private fun ToolCard(item: ChatItem.Tool) {
             .padding(8.dp),
     ) {
         Text(
-            item.name,
+            if (item.running) "${item.name} · 执行中" else item.name,
             color = if (item.ok) MidnightPrimary else MidnightDanger,
             fontWeight = FontWeight.SemiBold,
             fontSize = 11.sp,
         )
-        Text(
+        CopyableMessage(
             item.detail,
             color = MidnightMuted,
-            fontFamily = FontFamily.Monospace,
             fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
             maxLines = 8,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 4.dp),

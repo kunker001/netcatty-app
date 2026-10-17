@@ -25,6 +25,8 @@ import kotlinx.serialization.json.JsonObject
 data class OpsExecution(
     val hostId: String,
     val awaitingConfirm: Boolean,
+    val title: String = "",
+    val step: String = "",
 ) {
     val label: String get() = if (awaitingConfirm) "AI 等待确认" else "AI 执行中"
 }
@@ -217,7 +219,20 @@ class OpsChatStore(
     private fun publishExecutions() {
         _executions.value = buckets.values.mapNotNull { bucket ->
             val conv = bucket.conversations.firstOrNull { it.busy } ?: return@mapNotNull null
-            OpsExecution(hostId = bucket.hostId, awaitingConfirm = conv.pending != null)
+            val pending = conv.pending
+            val lastTool = conv.items.lastOrNull { it is ChatItem.Tool } as? ChatItem.Tool
+            val step = when {
+                pending != null -> "等待确认：${pending.command}"
+                lastTool?.running == true -> lastTool.detail.ifBlank { lastTool.name }
+                lastTool != null -> lastTool.detail.ifBlank { lastTool.name }
+                else -> "正在思考…"
+            }
+            OpsExecution(
+                hostId = bucket.hostId,
+                awaitingConfirm = pending != null,
+                title = conv.title,
+                step = step.replace('\n', ' ').trim().take(120),
+            )
         }
     }
 
