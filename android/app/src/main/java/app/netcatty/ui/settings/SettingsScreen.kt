@@ -31,6 +31,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -48,6 +49,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -66,6 +68,9 @@ import app.netcatty.ai.AiSettingsStore
 import app.netcatty.ai.PROVIDER_PRESETS
 import app.netcatty.ai.fetchLlmModels
 import app.netcatty.ai.labelZh
+import app.netcatty.update.AppRelease
+import app.netcatty.update.AppUpdater
+import app.netcatty.update.GITHUB_REPO
 import app.netcatty.ui.theme.CardRadius
 import app.netcatty.ui.theme.CompactBarTitle
 import app.netcatty.ui.theme.FieldRadius
@@ -92,6 +97,7 @@ fun SettingsScreen(
     store: AiSettingsStore,
     initial: AiSettings,
     defaultBlocklist: List<String>,
+    updater: AppUpdater,
     onSaved: (AiSettings) -> Unit = {},
     onBack: () -> Unit,
 ) {
@@ -117,8 +123,13 @@ fun SettingsScreen(
             onSaved = onSaved,
             onBack = { page = PAGE_HUB },
         )
-        PAGE_ABOUT -> AboutSettingsPage(onBack = { page = PAGE_HUB })
-        else -> SettingsHub(initial = initial, onOpen = { page = it }, onBack = onBack)
+        PAGE_ABOUT -> AboutSettingsPage(updater = updater, onBack = { page = PAGE_HUB })
+        else -> SettingsHub(
+            initial = initial,
+            versionName = updater.currentVersion(),
+            onOpen = { page = it },
+            onBack = onBack,
+        )
     }
 }
 
@@ -126,6 +137,7 @@ fun SettingsScreen(
 @Composable
 private fun SettingsHub(
     initial: AiSettings,
+    versionName: String,
     onOpen: (String) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -155,7 +167,7 @@ private fun SettingsHub(
         SettingsEntry(
             page = PAGE_ABOUT,
             title = "关于",
-            subtitle = "版本 0.2.0",
+            subtitle = "版本 $versionName",
             icon = Icons.Outlined.Info,
         ),
     )
@@ -503,7 +515,49 @@ private fun SearchSettingsPage(
 }
 
 @Composable
-private fun AboutSettingsPage(onBack: () -> Unit) {
+private fun AboutSettingsPage(updater: AppUpdater, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var latest by remember { mutableStateOf<AppRelease?>(null) }
+
+    fun checkNow() {
+        if (checking || downloading) return
+        checking = true
+        status = null
+        latest = null
+        scope.launch {
+            runCatching { updater.newerRelease() }
+                .onSuccess { release ->
+                    latest = release
+                    status = if (release == null) "已是最新版本 ${updater.currentVersion()}" else null
+                }
+                .onFailure { status = it.message ?: "检查更新失败" }
+            checking = false
+        }
+    }
+
+    fun downloadNow(release: AppRelease) {
+        if (downloading) return
+        if (updater.needsInstallPermission()) {
+            updater.openInstallPermissionSettings()
+            status = "请允许安装未知应用后，再点下载并安装"
+            return
+        }
+        downloading = true
+        progress = 0f
+        status = null
+        scope.launch {
+            runCatching {
+                val file = updater.download(release) { progress = it }
+                updater.install(file)
+            }.onFailure { status = it.message ?: "更新失败" }
+            downloading = false
+        }
+    }
+
     SettingsDetail(title = "关于", onBack = onBack) {
         ListItem(
             headlineContent = { Text("Netcatty Android", fontSize = 14.sp) },
@@ -512,9 +566,56 @@ private fun AboutSettingsPage(onBack: () -> Unit) {
         )
         ListItem(
             headlineContent = { Text("版本", fontSize = 14.sp) },
-            supportingContent = { Text("0.2.0") },
+            supportingContent = { Text(updater.currentVersion()) },
             colors = listColors(),
         )
+        ListItem(
+            headlineContent = { Text("更新源", fontSize = 14.sp) },
+            supportingContent = { Text("GitHub Release · $GITHUB_REPO") },
+            colors = listColors(),
+        )
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = {
+                val release = latest
+                if (release != null && !checking) downloadNow(release) else checkNow()
+            },
+            enabled = !checking && !downloading,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                when {
+                    downloading -> "正在下载 ${(progress * 100).toInt()}%"
+                    checking -> "正在检查…"
+                    latest != null -> "下载并安装 ${latest?.version}"
+                    else -> "检查更新"
+                },
+            )
+        }
+        if (downloading) {
+            LinearProgressIndicator(
+                progress = { progress.coerceIn(0f, 1f) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp),
+            )
+        }
+        latest?.notes?.takeIf { it.isNotBlank() }?.let { notes ->
+            Text(
+                notes.take(600),
+                color = MidnightMuted,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+        }
+        status?.let {
+            Text(
+                it,
+                color = if (it.contains("最新")) MidnightPrimary else MidnightDanger,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+        }
     }
 }
 

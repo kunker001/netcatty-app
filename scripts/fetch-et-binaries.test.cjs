@@ -60,7 +60,7 @@ async function serveAssets(t, assets) {
 test("fetch-et-binaries defaults to the dedicated et binary repository", () => {
   assert.deepEqual(parseEtBinRepository({}), { owner: "binaricat", repo: "Netcatty-et-bin" });
   assert.deepEqual(parseEtBinRepository({ GITHUB_REPOSITORY: "owner/project" }), {
-    owner: "owner",
+    owner: "binaricat",
     repo: "Netcatty-et-bin",
   });
   assert.deepEqual(

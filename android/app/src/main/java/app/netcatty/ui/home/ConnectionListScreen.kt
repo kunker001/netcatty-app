@@ -86,6 +86,7 @@ fun ConnectionListScreen(
     onHosts: () -> Unit,
     onTunnels: () -> Unit,
     onSettings: () -> Unit,
+    updateHint: String? = null,
 ) {
     LaunchedEffect(sessions) {
         while (true) {
@@ -124,7 +125,11 @@ fun ConnectionListScreen(
                         fontWeight = FontWeight.Black,
                         fontStyle = FontStyle.Italic,
                     )
-                    Text("仅显示正在进行的会话", color = MidnightMuted, fontSize = 12.sp)
+                    Text(
+                        if (updateHint != null) "有新版本 $updateHint 可更新" else "仅显示正在进行的会话",
+                        color = if (updateHint != null) MidnightPrimary else MidnightMuted,
+                        fontSize = 12.sp,
+                    )
                 }
                 IconButton(onClick = onTunnels) {
                     Icon(Icons.Outlined.Lan, contentDescription = "隧道", tint = MidnightMuted)

@@ -19,6 +19,7 @@ import app.netcatty.ssh.HostPingMonitor
 import app.netcatty.ssh.HostStatsMonitor
 import app.netcatty.ssh.SessionKeepAliveService
 import app.netcatty.ssh.SshCrypto
+import app.netcatty.update.AppUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -45,6 +46,8 @@ class NetcattyApp : Application() {
         private set
     lateinit var tunnels: TunnelStore
         private set
+    lateinit var updates: AppUpdater
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -55,6 +58,7 @@ class NetcattyApp : Application() {
         opsChats = OpsChatStore(this, appScope)
         liveSessions = LiveSessionStore(appScope, onRemoved = { id -> opsChats.pause(id) })
         tunnels = TunnelStore(TunnelRepository(this), appScope) { id -> hosts.spec(id) }
+        updates = AppUpdater(this)
         pings = HostPingMonitor()
         hostStats = HostStatsMonitor()
         appScope.launch {

@@ -12,8 +12,11 @@ import androidx.activity.enableEdgeToEdge
 import android.graphics.Color as AndroidColor
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -37,6 +40,8 @@ import app.netcatty.ui.terminal.TerminalScreen
 import app.netcatty.ui.theme.NetcattyTheme
 import app.netcatty.ui.tunnel.TunnelEditorScreen
 import app.netcatty.ui.tunnel.TunnelListScreen
+import app.netcatty.ui.update.UpdateDialog
+import app.netcatty.update.AppRelease
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
@@ -77,6 +82,31 @@ class MainActivity : ComponentActivity() {
                 val tunnelStatus by app.tunnels.status.collectAsStateWithLifecycle()
                 val sessionHolder = remember { SessionHolder() }
                 val openTarget by pendingOpen.collectAsStateWithLifecycle()
+                var pendingUpdate by remember { mutableStateOf<AppRelease?>(null) }
+                var updateDownloading by remember { mutableStateOf(false) }
+                var updateProgress by remember { mutableFloatStateOf(0f) }
+                var updateError by remember { mutableStateOf<String?>(null) }
+
+                fun startUpdate(release: AppRelease) {
+                    if (updateDownloading) return
+                    if (app.updates.needsInstallPermission()) {
+                        app.updates.openInstallPermissionSettings()
+                        updateError = "请允许安装未知应用后，再点下载更新"
+                        return
+                    }
+                    updateDownloading = true
+                    updateProgress = 0f
+                    updateError = null
+                    scope.launch {
+                        runCatching {
+                            val file = app.updates.download(release) { updateProgress = it }
+                            app.updates.install(file)
+                        }.onFailure { error ->
+                            updateError = error.message ?: "更新失败"
+                        }
+                        updateDownloading = false
+                    }
+                }
 
                 fun openConnection(conn: SshConnection) {
                     val spec = app.hosts.spec(conn.id) ?: return
@@ -94,6 +124,28 @@ class MainActivity : ComponentActivity() {
                     app.tunnels.autostart()
                     app.ai.load()
                     app.commandSafety.apply(app.ai.settings.value.commandBlocklist)
+                    if (app.updates.shouldAutoCheck()) {
+                        val latest = runCatching { app.updates.newerRelease() }.getOrNull()
+                        app.updates.markChecked()
+                        if (latest != null && latest.version != app.updates.skippedVersion()) {
+                            pendingUpdate = latest
+                        }
+                    }
+                }
+
+                pendingUpdate?.let { release ->
+                    UpdateDialog(
+                        release = release,
+                        currentVersion = app.updates.currentVersion(),
+                        downloading = updateDownloading,
+                        progress = updateProgress,
+                        error = updateError,
+                        onLater = {
+                            pendingUpdate = null
+                            updateError = null
+                        },
+                        onDownload = { startUpdate(release) },
+                    )
                 }
 
                 LaunchedEffect(openTarget, hosts, liveSessions) {
@@ -150,6 +202,7 @@ class MainActivity : ComponentActivity() {
                             onHosts = { nav.navigate("hosts") },
                             onTunnels = { nav.navigate("tunnels") },
                             onSettings = { nav.navigate("settings") },
+                            updateHint = pendingUpdate?.version,
                         )
                     }
                     composable("pick-host") {
@@ -437,6 +490,7 @@ class MainActivity : ComponentActivity() {
                             store = app.ai,
                             initial = aiSettings,
                             defaultBlocklist = app.commandSafety.defaultPatterns,
+                            updater = app.updates,
                             onSaved = { app.commandSafety.apply(it.commandBlocklist) },
                             onBack = { nav.popBackStack() },
                         )

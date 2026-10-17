@@ -144,9 +144,8 @@ function chmodExecutable(filePath) {
 }
 
 function parseEtBinRepository(env) {
-  const githubOwner = (env.GITHUB_REPOSITORY || "").split("/")[0];
   return {
-    owner: env.ET_BIN_OWNER || githubOwner || "binaricat",
+    owner: env.ET_BIN_OWNER || "binaricat",
     repo: env.ET_BIN_REPO || "Netcatty-et-bin",
   };
 }

@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white">
   &nbsp;
-  <img alt="Version" src="https://img.shields.io/badge/Version-0.2.0-blue?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/Version-0.2.1-blue?style=for-the-badge">
   &nbsp;
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-green?style=for-the-badge"></a>
 </p>
@@ -89,6 +89,7 @@ Netcatty for phones: a native Kotlin / Jetpack Compose app, not an Electron wrap
 2. On the connection list, tap **+** and connect.
 3. From the terminal, open SFTP, Docker, tunnels, or Catty.
 4. First Catty run: open **Settings**, set an OpenAI-compatible API base and key, then refresh the model list if needed.
+5. Updates come from GitHub Releases. The app checks on launch; you can also check from **Settings → About**.
 
 Destructive commands stay blocked by the safety rules. With a live session or tunnel, a keep-alive notification stays in the shade.
 
@@ -120,7 +121,7 @@ More Android project notes: [`android/README.md`](android/README.md).
 | Terminal | WebView + xterm.js |
 | Vault | EncryptedFile (AES-256-GCM) |
 | Catty | OpenAI-compatible API, OkHttp |
-| Package / version | `app.netcatty` · 0.2.0 |
+| Package / version | `app.netcatty` · 0.2.1 |
 
 ## Relation to the desktop app
 

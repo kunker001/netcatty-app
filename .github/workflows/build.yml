@@ -1,21 +1,9 @@
 name: build-packages
 
-# Trigger philosophy
-#  - Main pushes always run the package matrix. Pull requests run it only
-#    when packaging, native runtimes, or installer inputs change. Ordinary
-#    app changes are covered by the required test workflow's production build.
-#    Artifacts upload as workflow artifacts only; *no* release is published.
-#  - Tag push matching `v<MAJOR>.<MINOR>.<PATCH>` (with optional
-#    pre-release suffix like `v1.2.3-rc.1`) -> run the matrix and
-#    publish a GitHub Release. Loose tags like `v-test`, `vNEXT`, or
-#    `v1.0` no longer auto-publish.
-#  - Manual `workflow_dispatch` -> run the matrix on the selected ref.
-#    `publish_release` only publishes when the selected ref is also a
-#    strict version tag.
-#
-# The release job validates the exact same rule before publishing, so
-# adding branches/PRs above is safe; accidental tag-like branch names
-# won't leak a release.
+# This fork ships the Android client. Version tags must only run
+# `.github/workflows/android.yml`. Desktop Electron packaging stays
+# available as a manual workflow so it cannot 404 on a missing
+# kunker001/Netcatty-et-bin repo or overwrite the Android Release.
 on:
   workflow_dispatch:
     inputs:
@@ -31,60 +19,6 @@ on:
         description: "Release tag containing bundled et (EternalTerminal) binaries"
         type: string
         default: ""
-  push:
-    branches:
-      - main
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-[0-9A-Za-z]*"
-  pull_request:
-    paths:
-      - ".github/workflows/build.yml"
-      - "components/AppLockGate.tsx"
-      - "components/TrayPanel.tsx"
-      - "index.tsx"
-      - "index.css"
-      - "build/**"
-      - "electron-builder.config.cjs"
-      - "electron/**"
-      - "!electron/**/*.test.*"
-      - "!electron/**/*.spec.*"
-      - "!electron/**/__tests__/**"
-      - "!electron/**/test/**"
-      - "!electron/**/tests/**"
-      - "!electron/**/example/**"
-      - "!electron/**/examples/**"
-      - "!electron/plugins/fixtures/**"
-      - "infrastructure/config/terminalFlowConstants.*"
-      - "lib/**/*.cjs"
-      - "lib/**/*.json"
-      - "package.json"
-      - "package-lock.json"
-      - "packages/plugin-*/**"
-      - "patches/**"
-      - "public/icon*"
-      - "resources/**"
-      - "scripts/afterPackMacUuid.cjs"
-      - "scripts/beforePackCursorSdk.cjs"
-      - "scripts/build-et/**"
-      - "scripts/build-mosh/**"
-      - "scripts/ensure-node-pty-linux.sh"
-      - "scripts/et-extra-resources.cjs"
-      - "scripts/fetch-et-binaries.cjs"
-      - "scripts/fetch-mosh-binaries.cjs"
-      - "scripts/linux/**"
-      - "scripts/mosh-extra-resources.cjs"
-      - "scripts/nodePtyConptyPatch.cjs"
-      - "scripts/patch-xterm-macos-column-selection.cjs"
-      - "scripts/patch-xterm-foreground-intense.cjs"
-      - "scripts/patch-xterm-webgl-atlas.cjs"
-      - "scripts/rebuildPatchedNodePty.cjs"
-      - "scripts/resolve-et-bin-release.cjs"
-      - "scripts/resolve-mosh-bin-release.cjs"
-      - "scripts/tray-panel-layout.live.test.cjs"
-      - "scripts/verify-linux-*.sh"
-      - "scripts/xterm-macos-column-selection.live.test.cjs"
-      - "skills/**"
 
 # A newer run for the same main push or PR cancels older in-progress work.
 # Publishing tag runs share a release group across push and manual dispatch;

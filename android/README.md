@@ -11,7 +11,9 @@ GitHub Actions 会在推送 `v0.2.0` 这类版本 tag、或推到 `master` / `ma
 
 ## 构建
 
-需要 JDK 17+ 和 Android SDK 35。最低 Android 8.0（API 26）。包名 `app.netcatty`，版本 0.2.0。
+需要 JDK 17+ 和 Android SDK 35。最低 Android 8.0（API 26）。包名 `app.netcatty`，版本 0.2.1。
+
+推送 `v0.2.1` 这类 tag 会编译 APK 并发布到 GitHub Release，App 内更新从那里下载。
 
 ```powershell
 $env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot"

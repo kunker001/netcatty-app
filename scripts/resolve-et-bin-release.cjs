@@ -32,7 +32,9 @@ function validateReleaseTag(tag) {
 }
 
 function parseRepository(env) {
-  const owner = env.ET_BIN_OWNER || (env.GITHUB_REPOSITORY || "").split("/")[0] || "binaricat";
+  // Same as mosh: do not use the fork owner. This repo is not
+  // kunker001/Netcatty-et-bin; binaries live on the upstream host.
+  const owner = env.ET_BIN_OWNER || "binaricat";
   const repo = env.ET_BIN_REPO || "Netcatty-et-bin";
   return { owner, repo };
 }
