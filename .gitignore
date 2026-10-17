@@ -88,6 +88,8 @@
 !types/**
 !android/
 !android/**
+!img/
+!img/**
 
 # --- Layer 3: classical denylist (applies inside allowlisted trees) ---
 

@@ -50,6 +50,8 @@
 
 此 Netcatty 分支**不包含 Catty Agent / 内置 AI 助手**。SSH、SFTP、终端、Vault、同步与插件功能保留。
 
+原生 Android 客户端（主机保险库、实时会话、SFTP、Catty 运维对话）见 [`android/`](android/README.md)。
+
 ---
 
 # 目录 <!-- omit in toc -->

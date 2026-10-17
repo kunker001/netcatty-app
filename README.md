@@ -50,6 +50,8 @@
 
 This fork of Netcatty ships **without the Catty Agent / built-in AI assistant**. SSH, SFTP, terminal, vault, sync, and plugins remain.
 
+A native Android client (vault, live sessions, SFTP, and Catty ops chat) lives in [`android/`](android/README.md).
+
 ---
 
 # Contents <!-- omit in toc -->
