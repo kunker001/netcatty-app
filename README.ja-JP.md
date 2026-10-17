@@ -1,38 +1,20 @@
 <p align="center">
-  <img src="public/icon.png" alt="Netcatty" width="128" height="128">
+  <img src="public/icon.png" alt="Netcatty" width="96" height="96">
 </p>
 
 <h1 align="center">Netcatty</h1>
 
 <p align="center">
-  <strong>SSH クライアント、SFTP ブラウザ & ターミナルマネージャー</strong><br/>
-  <a href="https://netcatty.app"><strong>netcatty.app</strong></a>
+  <strong>ネイティブ Android SSH クライアント</strong><br/>
+  ホスト保管庫 · ライブセッション · 端末 / SFTP · ポート転送 · Catty 運用
 </p>
 
 <p align="center">
-  Electron、React、xterm.js で構築された機能豊富な SSH ワークスペース。<br/>
-  分割ターミナル · Vault ビュー · SFTP ワークフロー · カスタムテーマ — すべてが一つに。<br/>
-  このビルドには AI エージェントは含まれません。
-</p>
-
-<p align="center">
-  <a href="https://github.com/binaricat/Netcatty/releases/latest"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/binaricat/Netcatty?style=for-the-badge&logo=github&label=Release"></a>
+  <img alt="Platform" src="https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white">
   &nbsp;
-  <a href="#"><img alt="Platform" src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue?style=for-the-badge&logo=electron"></a>
+  <img alt="Version" src="https://img.shields.io/badge/Version-0.2.0-blue?style=for-the-badge">
   &nbsp;
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-green?style=for-the-badge"></a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/binaricat/Netcatty/releases/latest">
-    <img src="https://img.shields.io/github/v/release/binaricat/Netcatty?style=for-the-badge&logo=github&label=%E6%9C%80%E6%96%B0%E7%89%88%E3%82%92%E3%83%80%E3%82%A6%E3%83%B3%E3%83%AD%E3%83%BC%E3%83%89&color=success" alt="最新版をダウンロード">
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://ko-fi.com/binaricat">
-    <img src="https://cdn.ko-fi.com/cdn/kofi3.png?v=2" width="150" alt="Ko-fi でサポート">
-  </a>
 </p>
 
 <p align="center">
@@ -41,298 +23,45 @@
 
 ---
 
-<img width="3142" height="1764" alt="Screenshot 2026-07-02 at 22 51 24" src="https://github.com/user-attachments/assets/3116165d-623a-4d3a-a28a-914befb9b72d" />
+スマホ向け Netcatty です。Kotlin / Jetpack Compose のネイティブアプリで、Electron のラップではありません。中国語のライト UI。1 台のホストに複数の SSH 接続を持てます。Catty の会話はホストに紐づくので、切断後も履歴を開けます。
 
----
+詳しくは [English README](./README.md) を見てください。
 
-<a name="about-this-build"></a>
-# このビルドについて
-
-この Netcatty フォークは **Catty Agent / 内蔵 AI アシスタントなし** で提供されます。SSH、SFTP、ターミナル、Vault、同期、プラグインは残しています。
-
----
-
-# 目次 <!-- omit in toc -->
-
-- [このビルドについて](#about-this-build)
-- [Netcatty とは](#netcatty-とは)
-- [なぜ Netcatty](#なぜ-netcatty)
-- [機能](#機能)
-- [スクリーンショット](#スクリーンショット)
-  - [メインウィンドウ](#メインウィンドウ)
-  - [Vault ビュー](#vault-ビュー)
-  - [分割ターミナル](#分割ターミナル)
-- [対応ディストリビューション](#対応ディストリビューション)
-- [はじめに](#はじめに)
-- [ビルドとパッケージ](#ビルドとパッケージ)
-- [技術スタック](#技術スタック)
-- [コントリビューション](#コントリビューション)
-- [コントリビューター](#コントリビューター)
-- [Star 履歴](#star-履歴)
-- [ライセンス](#ライセンス)
-
----
-
-<a name="netcatty-とは"></a>
-# Netcatty とは
-
-**Netcatty** は、複数のリモートサーバーを効率的に管理する必要がある開発者、システム管理者、DevOps エンジニア向けに設計された、モダンなクロスプラットフォーム SSH クライアントおよびターミナルマネージャーです。
-
-- **Netcatty は** PuTTY、Termius、SecureCRT、macOS Terminal.app の代替となる SSH 接続ツール
-- **Netcatty は** デュアルペインのファイルブラウザを備えた強力な SFTP クライアント
-- **Netcatty は** 分割ペイン、タブ、セッション管理を備えたターミナルワークスペース
-- **Netcatty は** SSH、ローカルターミナル、Telnet、Mosh、シリアル接続をサポートします（利用可能な場合）
-- **Netcatty は** シェルの代替ではありません — SSH/Telnet/Mosh またはローカル/シリアルセッション経由でシェルに接続します
-
----
-
-<a name="なぜ-netcatty"></a>
-# なぜ Netcatty
-
-複数サーバーを日常的に扱うなら、Netcatty は「スピード」と「流れ」を重視した作りになっています：
-
-- **ワークスペース中心** — 分割ペイン + タブ + セッション復元で常時使うワークフローに対応
-- **Vault の整理** — グリッド/リスト/ツリー表示、高速検索、ドラッグしやすいワークフロー
-- **本格的な SFTP** — 内蔵エディタ + ドラッグ＆ドロップ + スムーズなファイル操作
-
----
-
-<a name="機能"></a>
-# 機能
-
-### 🗂️ Vault
-- **複数ビュー** — グリッド / リスト / ツリー
-- **高速検索** — ホストやグループを素早く見つける
-
-### 🖥️ ターミナルワークスペース
-- **分割ペイン** — 水平・垂直分割でマルチタスク
-- **セッション管理** — 複数の接続を並行して扱う
-- **インライン画像** — リモートプログラムが出力する Kitty グラフィックス、SIXEL、iTerm インライン画像を描画
-
-### 📁 SFTP + 内蔵エディタ
-- **ファイル作業** — ドラッグ＆ドロップでアップロード/ダウンロード
-- **その場で編集** — 内蔵エディタで小さな修正を素早く
-
-### 🎨 パーソナライズ
-- **カスタムテーマ** — UI の見た目を好みに調整
-- **キーワードハイライト** — ターミナル出力の強調表示ルールをカスタマイズ
-
----
-
-<a name="スクリーンショット"></a>
-# スクリーンショット
-
-<a name="メインウィンドウ"></a>
-## メインウィンドウ
-
-メインウィンドウは、長時間の SSH 作業を前提に設計されています。セッション、ナビゲーション、主要ツールへ素早くアクセスできます。
-
-<img width="1531" height="875" alt="black-grid" src="https://github.com/user-attachments/assets/004b80f6-5bbb-4f14-b8cd-33a0a5913b8c" />
-
-<img width="1550" height="876" alt="light" src="https://github.com/user-attachments/assets/2b59a999-a25e-4217-944c-9aef0a09f272" />
-
-<a name="vault-ビュー"></a>
-## Vault ビュー
-
-作業に合わせて見え方を切り替え：グリッドで全体像、リストでスキャン、ツリーで整理と階層ナビゲーション。
-
-<img width="1554" height="882" alt="list" src="https://github.com/user-attachments/assets/03249f15-b5f8-4770-a3c3-d5001636ea00" />
-
-<img width="1561" height="878" alt="tree" src="https://github.com/user-attachments/assets/739f7b66-3898-43d0-8dd3-b9b97fd8e8de" />
-
-<a name="分割ターミナル"></a>
-## 分割ターミナル
-
-分割ペインで複数のサーバー/タスクを同時に扱えます（例：デプロイ + ログ + 監視）。
-
-<img width="1560" height="871" alt="split" src="https://github.com/user-attachments/assets/c93a8523-6256-4bb3-8b6e-d599831f2f9f" />
-
----
-
-<a name="対応ディストリビューション"></a>
-# 対応ディストリビューション
-
-Netcatty は接続したホストの OS を検出し、ホスト一覧でアイコンとして表示します：
+## スクリーンショット
 
 <p align="center">
-  <img src="public/distro/ubuntu.svg" width="48" alt="Ubuntu" title="Ubuntu">
-  <img src="public/distro/debian.svg" width="48" alt="Debian" title="Debian">
-  <img src="public/distro/centos.svg" width="48" alt="CentOS" title="CentOS">
-  <img src="public/distro/fedora.svg" width="48" alt="Fedora" title="Fedora">
-  <img src="public/distro/arch.svg" width="48" alt="Arch Linux" title="Arch Linux">
-  <img src="public/distro/alpine.svg" width="48" alt="Alpine" title="Alpine">
-  <img src="public/distro/amazon.svg" width="48" alt="Amazon Linux" title="Amazon Linux">
-  <img src="public/distro/redhat.svg" width="48" alt="Red Hat" title="Red Hat">
-  <img src="public/distro/rocky.svg" width="48" alt="Rocky Linux" title="Rocky Linux">
-  <img src="public/distro/opensuse.svg" width="48" alt="openSUSE" title="openSUSE">
-  <img src="public/distro/oracle.svg" width="48" alt="Oracle Linux" title="Oracle Linux">
-  <img src="public/distro/kali.svg" width="48" alt="Kali Linux" title="Kali Linux">
-  <img src="public/distro/almalinux.svg" width="48" alt="AlmaLinux" title="AlmaLinux">
+  <img src="img/Screenshot_2026-10-17-12-42-47-69_b7dba69508580383bfc6e8bec53e420c.jpg" alt="ホスト一覧" width="220">
+  &nbsp;
+  <img src="img/Screenshot_2026-10-17-12-42-00-07_b7dba69508580383bfc6e8bec53e420c.jpg" alt="Catty 新規会話" width="220">
+  &nbsp;
+  <img src="img/Screenshot_2026-10-17-12-42-12-15_b7dba69508580383bfc6e8bec53e420c.jpg" alt="Catty 実行中" width="220">
 </p>
-
-<a name="はじめに"></a>
-# はじめに
-
-### ダウンロード
-
-[GitHub Releases](https://github.com/binaricat/Netcatty/releases/latest) からお使いのプラットフォームに対応した最新版をダウンロードしてください。
-
-| OS | サポート状況 |
-| :--- | :--- |
-| **macOS** | Universal (x64 / arm64) |
-| **Windows** | x64 / arm64 |
-| **Linux** | x64 / arm64 |
-
-または [GitHub Releases](https://github.com/binaricat/Netcatty/releases) ですべてのリリースを参照してください。
-
-### コード署名とプライバシー
-
-Netcatty は SignPath Foundation のオープンソースプログラムに申請中です。
-承認後、対象となる Windows リリース成果物には **Free code signing provided by SignPath.io, certificate by SignPath Foundation** が使用されます。詳細は
-[コード署名ポリシー](CODE_SIGNING_POLICY.md)と
-[プライバシーポリシー](PRIVACY.md)をご覧ください。申請と導入が完了するまで、
-Windows リリースは未署名の場合があります。
-
-> **Windows のポータブルデータ：** Netcatty を終了し、`Netcatty.exe`（zip 版）またはポータブル版ランチャーと同じ場所に `data` フォルダーを作成してください。次回起動時から、Netcatty はデータをこのフォルダーに保存します。保存済みのパスワードと秘密鍵は、作成した Windows ユーザーによって引き続き保護されます。別のコンピューターまたは Windows ユーザーへ移動した場合は、これらの機密情報を再入力する必要があります。
-
-> **Windows でフォルダーを Netcatty で開く：** インストール版では、エクスプローラーのフォルダーおよびフォルダー背景のコンテキストメニューに **Open in Netcatty** が追加されます。選択すると、そのフォルダーでローカルターミナルが開きます。Windows 11 では、先に **その他のオプションを表示** を選択してください。**設定 → システム → Windows Explorer** からメニューの表示／非表示を切り替えられます。ZIP 版とポータブル版では、既定ではこのメニューは追加されません。
-
-> **macOS ユーザーへ：** 現在のリリースはコード署名と notarization が行われている想定です。Gatekeeper の警告が出る場合は、GitHub Releases から最新版の公式ビルドを取得しているか確認してください。
-
-### Scoop（Windows x64、コミュニティ管理）
-
-[Scoop](https://scoop.sh/) をインストール済みの場合、コミュニティが管理する [lemon バケット](https://github.com/hoilc/scoop-lemon/blob/master/bucket/netcatty.json) から Netcatty をインストールできます。このバケットは Netcatty の公式 GitHub Releases からインストーラーをダウンロードします：
-
-```powershell
-scoop bucket add lemon https://github.com/hoilc/scoop-lemon
-scoop install lemon/netcatty
-```
-
-更新またはアンインストールの前に Netcatty を終了してください：
-
-```powershell
-scoop update
-scoop update netcatty
-```
-
-アンインストールする場合：
-
-```powershell
-scoop uninstall netcatty
-```
-
-これはサードパーティ製パッケージであり、Netcatty の公式バケットではありません。更新は GitHub Releases より遅れる場合があります。現在は x64 のみに対応しています。設定は `%APPDATA%\netcatty` に保存され、更新や通常のアンインストール後も残ります。`scoop uninstall netcatty --purge` はこれらの設定も削除します。この方法でインストールした場合は、Scoop で更新を管理してください。
-
-### Nix / NixOS
-
-Netcatty は Nix および NixOS ユーザー向けに、公式 Linux AppImage リリースをラップした flake を提供しています：
-
-```bash
-nix run github:binaricat/Netcatty
-```
-
-宣言型インストールには、Netcatty flake を input として追加し、NixOS または Home Manager のパッケージリストで `inputs.netcatty.packages.${pkgs.system}.default` を使用してください。
-
-### 前提条件
-- Node.js 18+ と npm
-- macOS、Windows 10+、または Linux
-
-### 開発
-
-```bash
-# リポジトリをクローン
-git clone https://github.com/binaricat/Netcatty.git
-cd Netcatty
-
-# 依存関係をインストール
-npm install
-
-# 開発モードを起動（Vite + Electron）
-npm run dev
-```
-
----
-
-<a name="ビルドとパッケージ"></a>
-# ビルドとパッケージ
-
-```bash
-# 本番用ビルド
-npm run build
-
-# 現在のプラットフォーム用にパッケージ
-npm run pack
-
-# 特定のプラットフォーム用にパッケージ
-npm run pack:mac     # macOS (DMG + ZIP)
-npm run pack:win     # Windows (NSIS インストーラー)
-npm run pack:linux   # Linux (AppImage + DEB + RPM)
-```
-
----
-
-<a name="技術スタック"></a>
-# 技術スタック
-
-| カテゴリ | テクノロジー |
-|--------|------------|
-| フレームワーク | Electron 40 |
-| フロントエンド | React 19, TypeScript |
-| ビルドツール | Vite 7 |
-| ターミナル | xterm.js 5 |
-| スタイリング | Tailwind CSS 4 |
-| SSH/SFTP | ssh2, ssh2-sftp-client |
-| PTY | node-pty |
-| アイコン | Lucide React |
-
----
-
-<a name="コントリビューション"></a>
-# コントリビューション
-
-コントリビューションを歓迎します！お気軽に Pull Request を提出してください。
-
-1. リポジトリをフォーク
-2. フィーチャーブランチを作成 (`git checkout -b feature/amazing-feature`)
-3. 変更をコミット (`git commit -m 'Add some amazing feature'`)
-4. ブランチにプッシュ (`git push origin feature/amazing-feature`)
-5. Pull Request をオープン
-
-アーキテクチャの概要とコーディング規約については [AGENTS.md](AGENTS.md) を参照してください。
-
----
-
-<a name="コントリビューター"></a>
-# コントリビューター
-
-貢献してくださったすべての方に感謝します！
-
-<a href="https://github.com/binaricat/Netcatty/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=binaricat/Netcatty" />
-</a>
-
----
-
-<a name="ライセンス"></a>
-# ライセンス
-
-このプロジェクトは **GPL-3.0 ライセンス** の下でライセンスされています - 詳細は [LICENSE](LICENSE) ファイルをご覧ください。
-
----
-
-<a name="star-履歴"></a>
-# Star 履歴
-
-<a href="https://www.star-history.com/#binaricat/Netcatty&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/star-history/star-history-dark.svg" />
-   <source media="(prefers-color-scheme: light)" srcset="docs/assets/star-history/star-history-light.svg" />
-   <img alt="Star History Chart" src="docs/assets/star-history/star-history-light.svg" />
- </picture>
-</a>
-
----
 
 <p align="center">
-  ❤️ を込めて作成 by <a href="https://ko-fi.com/binaricat">binaricat</a>
+  <img src="img/Screenshot_2026-10-17-12-42-25-70_b7dba69508580383bfc6e8bec53e420c.jpg" alt="Catty コマンド実行" width="220">
+  &nbsp;
+  <img src="img/Screenshot_2026-10-17-12-42-34-72_b7dba69508580383bfc6e8bec53e420c.jpg" alt="設定" width="220">
 </p>
+
+## 機能
+
+- 暗号化ホスト保管庫。ホームは接続中のセッションだけ
+- xterm.js 端末：ピンチズーム、点滅カーソル、長押しコピー
+- SFTP は `/` を含む全ディレクトリ。内蔵エディタあり
+- ローカル / リモート / 動的 SOCKS5 転送
+- Catty はホスト単位。通知に実行進捗を出す
+- cwd に docker-compose があればコンテナを操作できる
+
+## ビルド
+
+JDK 17+ と Android SDK 35 が必要です。最低 Android 8.0（API 26）。
+
+```powershell
+cd android
+.\gradlew.bat assembleDebug
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+```
+
+## ライセンス
+
+GPL-3.0。[LICENSE](LICENSE) を参照してください。
