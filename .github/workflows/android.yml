@@ -1,0 +1,76 @@
+name: android
+
+# Compile the native Android client under android/.
+# Debug APK only — there is no release keystore in this repo.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: assemble-debug
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            android/*.gradle*
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Name APK
+        id: apk
+        run: |
+          version="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+          if [[ -z "$version" ]]; then
+            version="0.0.0"
+          fi
+          short_sha="${GITHUB_SHA:0:7}"
+          name="netcatty-${version}-${short_sha}-debug.apk"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/artifacts/${name}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "Built ${name}"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: artifacts/${{ steps.apk.outputs.name }}
+          if-no-files-found: error
