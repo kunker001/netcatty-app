@@ -36,8 +36,8 @@ android {
         applicationId = "app.netcatty"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.2.2"
+        versionCode = 5
+        versionName = "0.2.3"
     }
 
     // F-Droid reproducible builds fail when dependency metadata is embedded.
@@ -129,4 +129,6 @@ dependencies {
     implementation("org.bouncycastle:bcpkix-jdk18on:1.79")
     implementation("net.i2p.crypto:eddsa:0.3.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    testImplementation("junit:junit:4.13.2")
 }

@@ -492,6 +492,9 @@ class MainActivity : ComponentActivity() {
                             defaultBlocklist = app.commandSafety.defaultPatterns,
                             updater = app.updates,
                             onSaved = { app.commandSafety.apply(it.commandBlocklist) },
+                            onExport = app.backup::exportEncrypted,
+                            onOpenImport = app.backup::openEncrypted,
+                            onCommitImport = app.backup::commitImport,
                             onBack = { nav.popBackStack() },
                         )
                     }

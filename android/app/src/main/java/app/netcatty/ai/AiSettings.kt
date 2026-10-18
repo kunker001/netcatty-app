@@ -89,6 +89,34 @@ data class WebSearchConfig(
 }
 
 @Serializable
+data class ModelProfile(
+    val id: String,
+    val name: String = "",
+    val providerId: String = "openai",
+    val baseUrl: String = "https://api.openai.com/v1",
+    val model: String = "",
+    val apiKey: String = "",
+) {
+    fun title(): String {
+        val custom = name.trim()
+        if (custom.isNotEmpty()) return custom
+        val provider = PROVIDER_PRESETS.firstOrNull { it.id == providerId }?.label
+            ?.takeIf { providerId != "custom" }
+        val modelName = model.trim().ifBlank { "未命名模型" }
+        return if (provider.isNullOrBlank()) modelName else "$provider · $modelName"
+    }
+
+    fun cleaned(): ModelProfile = copy(
+        id = id.trim(),
+        name = name.trim(),
+        providerId = providerId.trim().ifBlank { "openai" },
+        baseUrl = baseUrl.trim(),
+        model = model.trim(),
+        apiKey = apiKey.trim(),
+    )
+}
+
+@Serializable
 data class AiSettings(
     val providerId: String = "openai",
     val baseUrl: String = "https://api.openai.com/v1",
@@ -100,12 +128,77 @@ data class AiSettings(
     val maxIterations: Int = 8,
     val commandBlocklist: List<String>? = null,
     val webSearch: WebSearchConfig = WebSearchConfig(),
+    val profiles: List<ModelProfile> = emptyList(),
+    val activeProfileId: String = "",
 ) {
     val configured: Boolean
         get() = apiKey.isNotBlank() && model.isNotBlank() && baseUrl.isNotBlank()
 
     val preset: ProviderPreset
         get() = PROVIDER_PRESETS.firstOrNull { it.id == providerId } ?: PROVIDER_PRESETS.last()
+}
+
+private const val MAX_MODEL_PROFILES = 20
+
+/** Older saves had a single model. A configured key becomes the first profile. */
+fun AiSettings.ensureProfiles(): AiSettings {
+    val cleaned = profiles.map { it.cleaned() }.filter { it.id.isNotBlank() }.distinctBy { it.id }.take(MAX_MODEL_PROFILES)
+    if (cleaned.isEmpty()) {
+        if (apiKey.isBlank()) return copy(profiles = emptyList(), activeProfileId = "")
+        val legacy = ModelProfile(
+            id = "default",
+            providerId = providerId.ifBlank { "openai" },
+            baseUrl = baseUrl,
+            model = model,
+            apiKey = apiKey,
+        ).cleaned()
+        return copy(profiles = listOf(legacy), activeProfileId = legacy.id).applyActiveProfile()
+    }
+    return copy(profiles = cleaned).applyActiveProfile()
+}
+
+fun AiSettings.saveProfile(profile: ModelProfile, select: Boolean): AiSettings {
+    val clean = profile.cleaned()
+    if (clean.id.isBlank()) return this
+    val without = profiles.filterNot { it.id == clean.id }
+    val nextProfiles = if (without.size >= MAX_MODEL_PROFILES && profiles.none { it.id == clean.id }) {
+        without.drop(1) + clean
+    } else {
+        without + clean
+    }
+    val nextActive = if (select || activeProfileId.isBlank()) clean.id else activeProfileId
+    return copy(profiles = nextProfiles, activeProfileId = nextActive).ensureProfiles()
+}
+
+fun AiSettings.selectProfile(id: String): AiSettings =
+    copy(activeProfileId = id).ensureProfiles()
+
+fun AiSettings.removeProfile(id: String): AiSettings {
+    val remaining = profiles.filterNot { it.id == id }
+    if (remaining.isEmpty()) {
+        return copy(
+            profiles = emptyList(),
+            activeProfileId = "",
+            providerId = "openai",
+            baseUrl = "",
+            model = "",
+            apiKey = "",
+        )
+    }
+    val nextActive = if (activeProfileId == id) remaining.first().id else activeProfileId
+    return copy(profiles = remaining, activeProfileId = nextActive).ensureProfiles()
+}
+
+private fun AiSettings.applyActiveProfile(): AiSettings {
+    val active = profiles.firstOrNull { it.id == activeProfileId } ?: profiles.firstOrNull()
+        ?: return copy(activeProfileId = "")
+    return copy(
+        activeProfileId = active.id,
+        providerId = active.providerId,
+        baseUrl = active.baseUrl,
+        model = active.model,
+        apiKey = active.apiKey,
+    )
 }
 
 class AiSettingsStore(context: Context) {
@@ -130,8 +223,9 @@ class AiSettingsStore(context: Context) {
 
     suspend fun save(next: AiSettings) = withContext(Dispatchers.IO) {
         mutex.withLock {
-            persist(next)
-            _settings.value = next
+            val clean = next.ensureProfiles()
+            persist(clean)
+            _settings.value = clean
         }
     }
 
@@ -141,7 +235,7 @@ class AiSettingsStore(context: Context) {
             encrypted()
                 .openFileInput()
                 .use { json.decodeFromString<AiSettings>(it.readBytes().decodeToString()) }
-        }.getOrDefault(AiSettings())
+        }.getOrDefault(AiSettings()).ensureProfiles()
     }
 
     private fun persist(value: AiSettings) {

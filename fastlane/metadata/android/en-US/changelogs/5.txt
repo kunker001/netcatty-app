@@ -1,0 +1,1 @@
+Group hosts, and export or import hosts, logins, tunnels, and Catty models in a password-encrypted backup. Save multiple Catty models and switch the active one. Backup is in Settings.

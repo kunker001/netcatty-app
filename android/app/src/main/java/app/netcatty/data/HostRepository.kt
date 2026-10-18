@@ -127,6 +127,27 @@ class HostRepository(context: Context) {
         upsertConnection(current.copy(lastConnectedAt = System.currentTimeMillis()))
     }
 
+    suspend fun snapshot(): VaultSnapshot = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            VaultSnapshot(_hosts.value.toList(), _connections.value.toList())
+        }
+    }
+
+    suspend fun applyImport(payload: VaultPayload, mode: VaultImportMode) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val clean = VaultTransfer.sanitize(payload)
+            val (hosts, connections) = when (mode) {
+                VaultImportMode.REPLACE -> clean.hosts to clean.connections
+                VaultImportMode.MERGE -> VaultTransfer.merge(_hosts.value, _connections.value, clean)
+            }
+            val sortedHosts = hosts.sortedHosts()
+            val sortedConns = connections.sortedConns()
+            persist(sortedHosts, sortedConns)
+            _hosts.value = sortedHosts
+            _connections.value = sortedConns
+        }
+    }
+
     private fun List<Host>.sortedHosts(): List<Host> =
         sortedWith(compareBy<Host> { it.group.lowercase() }.thenBy { it.title.lowercase() })
 

@@ -25,10 +25,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.Upload
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -61,13 +63,21 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.netcatty.ai.AiSettings
 import app.netcatty.ai.AiSettingsStore
+import app.netcatty.ai.ModelProfile
 import app.netcatty.ai.PROVIDER_PRESETS
 import app.netcatty.ai.fetchLlmModels
 import app.netcatty.ai.labelZh
+import app.netcatty.ai.removeProfile
+import app.netcatty.ai.saveProfile
+import app.netcatty.ai.selectProfile
+import app.netcatty.data.VaultImportSummary
+import app.netcatty.data.VaultPayload
+import app.netcatty.ui.host.VaultTransferActions
 import app.netcatty.update.AppRelease
 import app.netcatty.update.AppUpdater
 import app.netcatty.update.GITHUB_REPO
@@ -85,11 +95,13 @@ import app.netcatty.ui.theme.ScreenPad
 import app.netcatty.ui.theme.appFieldColors
 import app.netcatty.ui.theme.appTopBarColors
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 private const val PAGE_HUB = "hub"
 private const val PAGE_MODEL = "model"
 private const val PAGE_SAFETY = "safety"
 private const val PAGE_SEARCH = "search"
+private const val PAGE_BACKUP = "backup"
 private const val PAGE_ABOUT = "about"
 
 @Composable
@@ -99,6 +111,9 @@ fun SettingsScreen(
     defaultBlocklist: List<String>,
     updater: AppUpdater,
     onSaved: (AiSettings) -> Unit = {},
+    onExport: suspend (String) -> ByteArray,
+    onOpenImport: suspend (ByteArray, String) -> VaultPayload,
+    onCommitImport: suspend (VaultPayload, Boolean) -> VaultImportSummary,
     onBack: () -> Unit,
 ) {
     var page by remember { mutableStateOf(PAGE_HUB) }
@@ -123,6 +138,12 @@ fun SettingsScreen(
             onSaved = onSaved,
             onBack = { page = PAGE_HUB },
         )
+        PAGE_BACKUP -> BackupSettingsPage(
+            onExport = onExport,
+            onOpenImport = onOpenImport,
+            onCommitImport = onCommitImport,
+            onBack = { page = PAGE_HUB },
+        )
         PAGE_ABOUT -> AboutSettingsPage(updater = updater, onBack = { page = PAGE_HUB })
         else -> SettingsHub(
             initial = initial,
@@ -145,7 +166,12 @@ private fun SettingsHub(
         SettingsEntry(
             page = PAGE_MODEL,
             title = "Catty 模型",
-            subtitle = if (initial.configured) "${initial.preset.label} · ${initial.model}" else "未配置密钥",
+            subtitle = when {
+                initial.profiles.size > 1 && initial.configured -> "${initial.profiles.size} 个模型 · ${initial.model}"
+                initial.configured -> "${initial.preset.label} · ${initial.model}"
+                initial.profiles.isNotEmpty() -> "${initial.profiles.size} 个模型"
+                else -> "未配置密钥"
+            },
             icon = Icons.Outlined.AutoAwesome,
         ),
         SettingsEntry(
@@ -163,6 +189,12 @@ private fun SettingsHub(
                 "未启用"
             },
             icon = Icons.Outlined.Language,
+        ),
+        SettingsEntry(
+            page = PAGE_BACKUP,
+            title = "备份",
+            subtitle = "加密导出与导入",
+            icon = Icons.Outlined.Upload,
         ),
         SettingsEntry(
             page = PAGE_ABOUT,
@@ -246,6 +278,10 @@ private fun ModelSettingsPage(
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    var activeId by remember { mutableStateOf(initial.activeProfileId) }
+    var profileName by remember {
+        mutableStateOf(initial.profiles.firstOrNull { it.id == initial.activeProfileId }?.name.orEmpty())
+    }
     var providerId by remember { mutableStateOf(initial.providerId) }
     var baseUrl by remember { mutableStateOf(initial.baseUrl) }
     var model by remember { mutableStateOf(initial.model) }
@@ -256,6 +292,7 @@ private fun ModelSettingsPage(
     var models by remember { mutableStateOf<List<String>>(emptyList()) }
     var loadingModels by remember { mutableStateOf(false) }
     var modelsError by remember { mutableStateOf<String?>(null) }
+    var applyingProfile by remember { mutableStateOf(false) }
     val preset = PROVIDER_PRESETS.firstOrNull { it.id == providerId } ?: PROVIDER_PRESETS.last()
     val filteredModels = remember(model, models) {
         val query = model.trim()
@@ -283,10 +320,48 @@ private fun ModelSettingsPage(
         modelsError = null
         modelOpen = false
     }
-    LaunchedEffect(providerId, baseUrl, model, apiKey) { saved = false }
+    LaunchedEffect(providerId, baseUrl, model, apiKey, profileName) {
+        if (applyingProfile) {
+            applyingProfile = false
+        } else {
+            saved = false
+        }
+    }
     LaunchedEffect(Unit) {
         if (baseUrl.isNotBlank() && (apiKey.isNotBlank() || providerId == "ollama")) {
             loadModels(openWhenReady = false)
+        }
+    }
+
+    fun draft(id: String): ModelProfile = ModelProfile(
+        id = id,
+        name = profileName,
+        providerId = providerId,
+        baseUrl = baseUrl,
+        model = model,
+        apiKey = apiKey,
+    )
+
+    fun show(settings: AiSettings) {
+        val selected = settings.profiles.firstOrNull { it.id == settings.activeProfileId }
+        applyingProfile = true
+        activeId = settings.activeProfileId
+        profileName = selected?.name.orEmpty()
+        providerId = selected?.providerId ?: settings.providerId
+        baseUrl = selected?.baseUrl ?: settings.baseUrl
+        model = selected?.model ?: settings.model
+        apiKey = selected?.apiKey ?: settings.apiKey
+        models = emptyList()
+        modelsError = null
+        modelOpen = false
+    }
+
+    fun persist(next: AiSettings, markSaved: Boolean) {
+        scope.launch {
+            store.save(next)
+            onSaved(next)
+            show(next)
+            saved = markSaved
         }
     }
 
@@ -295,25 +370,51 @@ private fun ModelSettingsPage(
         onBack = onBack,
         saveLabel = if (saved) "已保存" else "保存",
         onSave = {
-            scope.launch {
-                val next = initial.copy(
-                    providerId = providerId,
-                    baseUrl = baseUrl.trim(),
-                    model = model.trim(),
-                    apiKey = apiKey.trim(),
-                )
-                store.save(next)
-                onSaved(next)
-                saved = true
-            }
+            val id = activeId.ifBlank { UUID.randomUUID().toString() }
+            persist(initial.saveProfile(draft(id), select = true), markSaved = true)
         },
     ) {
         Text(
-            "使用 OpenAI 兼容接口。",
+            "可以保存多个模型，点一下切换。Catty 使用标成「使用中」的那个。",
             color = MidnightMuted,
             fontSize = 12.sp,
             modifier = Modifier.padding(bottom = 10.dp),
         )
+        if (initial.profiles.isEmpty()) {
+            Text(
+                "还没有保存的模型。填好下面的内容后点保存。",
+                color = MidnightMuted,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        } else {
+            initial.profiles.forEach { profile ->
+                ModelProfileRow(
+                    title = profile.title(),
+                    selected = profile.id == activeId,
+                    onSelect = {
+                        if (profile.id == activeId) return@ModelProfileRow
+                        val base = if (activeId.isBlank()) initial else initial.saveProfile(draft(activeId), select = false)
+                        persist(base.selectProfile(profile.id), markSaved = true)
+                    },
+                    onDelete = { persist(initial.removeProfile(profile.id), markSaved = true) },
+                )
+            }
+            TextButton(
+                onClick = {
+                    if (model.isBlank()) {
+                        modelsError = "先填写要添加的模型"
+                        return@TextButton
+                    }
+                    persist(
+                        initial.saveProfile(draft(UUID.randomUUID().toString()).copy(name = ""), select = true),
+                        markSaved = true,
+                    )
+                },
+            ) { Text("添加为新模型") }
+        }
+        Field("名称", profileName) { profileName = it }
+        Spacer(Modifier.height(8.dp))
         ExposedDropdownMenuBox(expanded = providerOpen, onExpandedChange = { providerOpen = it }) {
             OutlinedTextField(
                 value = preset.label,
@@ -425,6 +526,64 @@ private fun ModelSettingsPage(
             textStyle = TextStyle(fontSize = 14.sp, color = MidnightText),
             shape = FieldRadius,
             colors = appFieldColors(),
+        )
+    }
+}
+
+@Composable
+private fun ModelProfileRow(
+    title: String,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp)
+            .clip(RoundedCornerShape(CardRadius))
+            .background(if (selected) MidnightPrimary.copy(alpha = 0.08f) else MidnightSurface)
+            .border(1.dp, if (selected) MidnightPrimary else MidnightBorder, RoundedCornerShape(CardRadius))
+            .clickable(onClick = onSelect)
+            .padding(start = 12.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            modifier = Modifier.weight(1f),
+            color = MidnightText,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (selected) {
+            Text("使用中", color = MidnightPrimary, fontSize = 11.sp)
+        }
+        IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+            Icon(Icons.Outlined.Close, contentDescription = "删除模型", tint = MidnightMuted, modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun BackupSettingsPage(
+    onExport: suspend (String) -> ByteArray,
+    onOpenImport: suspend (ByteArray, String) -> VaultPayload,
+    onCommitImport: suspend (VaultPayload, Boolean) -> VaultImportSummary,
+    onBack: () -> Unit,
+) {
+    SettingsDetail(title = "备份", onBack = onBack) {
+        Text(
+            "导出主机会话、登录配置、隧道和全部 Catty 模型。文件用密码加密，忘记密码将无法打开。",
+            color = MidnightMuted,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+        )
+        VaultTransferActions(
+            onExport = onExport,
+            onOpenImport = onOpenImport,
+            onCommitImport = onCommitImport,
         )
     }
 }

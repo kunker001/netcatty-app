@@ -27,11 +27,22 @@ Builds:
     gradle:
       - fdroid
     output: app/build/outputs/apk/fdroid/release/app-fdroid-release-unsigned.apk
+  - versionName: '0.2.3'
+    versionCode: 5
+    commit: v0.2.3
+    subdir: android
+    sudo:
+      - apt-get update
+      - apt-get install -y openjdk-17-jdk-headless
+      - update-java-alternatives -a
+    gradle:
+      - fdroid
+    output: app/build/outputs/apk/fdroid/release/app-fdroid-release-unsigned.apk
 
 AllowedAPKSigningKeys: a3bd9a70b44d4e744cfa2ef14d3b63bbd4b84649d4d93d3b1fc7c2cb0c60849e
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
 UpdateCheckData: android/app/build.gradle.kts|versionCode = (\d+)|versionName = "([^"]+)"
-CurrentVersion: '0.2.2'
-CurrentVersionCode: 4
+CurrentVersion: '0.2.3'
+CurrentVersionCode: 5

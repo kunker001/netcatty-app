@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white">
   &nbsp;
-  <img alt="Version" src="https://img.shields.io/badge/Version-0.2.2-blue?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/Version-0.2.3-blue?style=for-the-badge">
   &nbsp;
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-green?style=for-the-badge"></a>
 </p>
@@ -121,7 +121,7 @@ More Android project notes: [`android/README.md`](android/README.md).
 | Terminal | WebView + xterm.js |
 | Vault | EncryptedFile (AES-256-GCM) |
 | Catty | OpenAI-compatible API, OkHttp |
-| Package / version | `app.netcatty` · 0.2.2 |
+| Package / version | `app.netcatty` · 0.2.3 |
 
 ## Relation to the desktop app
 

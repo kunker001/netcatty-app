@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -45,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.netcatty.data.Host
 import app.netcatty.data.SshConnection
+import app.netcatty.data.hostSections
+import app.netcatty.data.hostSectionsNeedHeaders
 import app.netcatty.ui.theme.CardRadius
 import app.netcatty.ui.theme.CompactBarTitle
 import app.netcatty.ui.theme.MidnightBackground
@@ -70,11 +73,19 @@ fun HostListScreen(
     onDelete: (Host) -> Unit,
 ) {
     val counts = remember(connections) { connections.groupingBy { it.hostId }.eachCount() }
+    val sections = remember(hosts) { hostSections(hosts) }
+    val showGroups = hostSectionsNeedHeaders(sections)
+    val expanded = remember { mutableStateMapOf<String, Boolean>() }
     Scaffold(
         containerColor = MidnightBackground,
         topBar = {
             TopAppBar(
-                title = { CompactBarTitle("主机", "一台主机可对应多条连接") },
+                title = {
+                    CompactBarTitle(
+                        "主机",
+                        if (showGroups) "${sections.size} 个分组 · ${hosts.size} 台主机" else "一台主机可对应多条连接",
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
@@ -115,15 +126,32 @@ fun HostListScreen(
                 contentPadding = PaddingValues(bottom = 72.dp, top = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(hosts, key = { it.id }) { host ->
-                    HostRow(
-                        host = host,
-                        connectionCount = counts[host.id] ?: 0,
-                        onOpen = { onOpen(host) },
-                        onOpenCatty = { onOpenCatty(host) },
-                        onOpenNotes = { onOpenNotes(host) },
-                        onDelete = { onDelete(host) },
-                    )
+                sections.forEach { section ->
+                    val open = !showGroups || expanded[section.key] != false
+                    if (showGroups) {
+                        item(key = "group:${section.key}") {
+                            HostGroupHeader(
+                                title = section.title,
+                                count = section.hosts.size,
+                                expanded = open,
+                                onToggle = { expanded[section.key] = !open },
+                            )
+                        }
+                    }
+                    if (open) {
+                        items(section.hosts, key = { it.id }) { host ->
+                            Box(Modifier.padding(start = if (showGroups) 8.dp else 0.dp)) {
+                                HostRow(
+                                    host = host,
+                                    connectionCount = counts[host.id] ?: 0,
+                                    onOpen = { onOpen(host) },
+                                    onOpenCatty = { onOpenCatty(host) },
+                                    onOpenNotes = { onOpenNotes(host) },
+                                    onDelete = { onDelete(host) },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

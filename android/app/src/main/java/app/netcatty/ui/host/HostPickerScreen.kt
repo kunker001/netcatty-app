@@ -29,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,6 +42,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.netcatty.data.Host
 import app.netcatty.data.SshConnection
+import app.netcatty.data.hostSections
+import app.netcatty.data.hostSectionsNeedHeaders
 import app.netcatty.ui.theme.CardRadius
 import app.netcatty.ui.theme.CompactBarTitle
 import app.netcatty.ui.theme.MidnightBackground
@@ -64,12 +67,20 @@ fun HostPickerScreen(
 ) {
     var picking by remember { mutableStateOf<Host?>(null) }
     val byHost = remember(connections) { connections.groupBy { it.hostId } }
+    val sections = remember(hosts) { hostSections(hosts) }
+    val showGroups = hostSectionsNeedHeaders(sections)
+    val expanded = remember { mutableStateMapOf<String, Boolean>() }
 
     Scaffold(
         containerColor = MidnightBackground,
         topBar = {
             TopAppBar(
-                title = { CompactBarTitle("选择主机", "选一台开始连接") },
+                title = {
+                    CompactBarTitle(
+                        "选择主机",
+                        if (showGroups) "${sections.size} 个分组" else "选一台开始连接",
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
@@ -106,19 +117,36 @@ fun HostPickerScreen(
                 contentPadding = PaddingValues(bottom = 24.dp, top = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(hosts, key = { it.id }) { host ->
-                    HostPickerRow(
-                        host = host,
-                        connectionCount = byHost[host.id]?.size ?: 0,
-                        onClick = {
-                            val conns = byHost[host.id].orEmpty()
-                            when {
-                                conns.isEmpty() -> onNeedConnection(host)
-                                conns.size == 1 -> onConnect(conns.first())
-                                else -> picking = host
+                sections.forEach { section ->
+                    val open = !showGroups || expanded[section.key] != false
+                    if (showGroups) {
+                        item(key = "group:${section.key}") {
+                            HostGroupHeader(
+                                title = section.title,
+                                count = section.hosts.size,
+                                expanded = open,
+                                onToggle = { expanded[section.key] = !open },
+                            )
+                        }
+                    }
+                    if (open) {
+                        items(section.hosts, key = { it.id }) { host ->
+                            Box(Modifier.padding(start = if (showGroups) 8.dp else 0.dp)) {
+                                HostPickerRow(
+                                    host = host,
+                                    connectionCount = byHost[host.id]?.size ?: 0,
+                                    onClick = {
+                                        val conns = byHost[host.id].orEmpty()
+                                        when {
+                                            conns.isEmpty() -> onNeedConnection(host)
+                                            conns.size == 1 -> onConnect(conns.first())
+                                            else -> picking = host
+                                        }
+                                    },
+                                )
                             }
-                        },
-                    )
+                        }
+                    }
                 }
             }
         }

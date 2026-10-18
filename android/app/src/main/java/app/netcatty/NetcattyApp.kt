@@ -9,6 +9,7 @@ import app.netcatty.data.Host
 import app.netcatty.data.HostRepository
 import app.netcatty.data.TunnelRepository
 import app.netcatty.data.TunnelRule
+import app.netcatty.data.VaultBackup
 import app.netcatty.session.LiveSession
 import app.netcatty.session.LiveSessionStore
 import app.netcatty.session.LiveStatus
@@ -48,6 +49,8 @@ class NetcattyApp : Application() {
         private set
     lateinit var updates: AppUpdater
         private set
+    lateinit var backup: VaultBackup
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -58,6 +61,17 @@ class NetcattyApp : Application() {
         opsChats = OpsChatStore(this, appScope)
         liveSessions = LiveSessionStore(appScope, onRemoved = { id -> opsChats.pause(id) })
         tunnels = TunnelStore(TunnelRepository(this), appScope) { id -> hosts.spec(id) }
+        backup = VaultBackup(
+            hosts = hosts,
+            tunnels = tunnels,
+            sessions = liveSessions,
+            onHostsRemoved = { ids -> ids.forEach(opsChats::deleteHost) },
+            currentAgent = { ai.settings.value },
+            onAgentImported = { settings ->
+                ai.save(settings)
+                commandSafety.apply(settings.commandBlocklist)
+            },
+        )
         updates = AppUpdater(this)
         pings = HostPingMonitor()
         hostStats = HostStatsMonitor()

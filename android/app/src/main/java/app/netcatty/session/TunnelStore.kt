@@ -135,6 +135,23 @@ class TunnelStore(
         repository.replace(next)
     }
 
+    suspend fun importRules(incoming: List<TunnelRule>, replace: Boolean, liveConnectionIds: Set<String>) {
+        val accepted = incoming.filter { it.id.isNotBlank() && it.connectionId in liveConnectionIds }
+        val next = if (replace) {
+            accepted
+        } else {
+            val merged = _rules.value.associateBy { it.id }.toMutableMap()
+            accepted.forEach { merged[it.id] = it }
+            merged.values.filter { it.connectionId in liveConnectionIds }
+        }.sortedBy { it.createdAt }
+        val previous = _rules.value.associateBy { it.id }
+        val stopIds = previous.filter { (id, rule) -> next.firstOrNull { it.id == id } != rule }.keys
+        stopIds.forEach { stop(it) }
+        _rules.value = next
+        _status.update { it - stopIds }
+        repository.replace(next)
+    }
+
     suspend fun removeConnections(ids: Set<String>) {
         if (ids.isEmpty()) return
         val gone = _rules.value.filter { it.connectionId in ids }.map { it.id }
